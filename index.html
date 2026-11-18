@@ -69,8 +69,13 @@
   .icon-btn svg { width: 18px; height: 18px; }
 
   .toolbar { background: rgba(36,38,44,.9); border-radius: 22px; padding: 6px; display: flex; gap: 2px;
-    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
-  .tool { position: relative; width: 58px; height: 58px; border: 0; border-radius: 16px; background: transparent; color: #cfc8b8;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    max-width: 100%; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .toolbar.more-end { -webkit-mask-image: linear-gradient(to right, #000 82%, transparent); mask-image: linear-gradient(to right, #000 82%, transparent); }
+  .toolbar.more-start { -webkit-mask-image: linear-gradient(to left, #000 82%, transparent); mask-image: linear-gradient(to left, #000 82%, transparent); }
+  .toolbar.more-start.more-end { -webkit-mask-image: linear-gradient(to right, transparent, #000 18%, #000 82%, transparent); mask-image: linear-gradient(to right, transparent, #000 18%, #000 82%, transparent); }
+  .tool { flex: none; position: relative; width: 58px; height: 58px; border: 0; border-radius: 16px; background: transparent; color: #cfc8b8;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 10px; font-weight: 600;
     white-space: nowrap; padding: 0; }
   .toolbar.six .tool { width: 55px; font-size: 9.5px; }
@@ -87,7 +92,7 @@
     #top { padding-top: calc(env(safe-area-inset-top) + 6px); padding-bottom: 0; }
     #bottom { top: 0; bottom: 0; left: auto; right: 0; flex-direction: column; justify-content: center;
       padding: calc(env(safe-area-inset-top) + 56px) calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 8px) 8px; }
-    .toolbar { flex-direction: column; border-radius: 20px; }
+    .toolbar { flex-direction: column; border-radius: 20px; max-height: 100%; overflow-x: hidden; overflow-y: auto; }
     .tool, .toolbar.six .tool { width: 62px; height: 44px; font-size: 9.5px; gap: 1px; }
     .tool svg { width: 20px; height: 20px; }
     .tool .count { top: 1px; right: 3px; }
@@ -136,11 +141,12 @@
   .steps li { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 12px; font-size: 15px; line-height: 1.4; color: #3d3a33; }
   .steps li span.n { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--ink); color: var(--paper); font-size: 13px;
     font-weight: 700; display: grid; place-items: center; margin-top: 1px; }
-  .choices { display: flex; gap: 10px; margin-top: 8px; }
-  .choice { flex: 1; border: 2px solid transparent; background: #fff; border-radius: 18px; padding: 16px 8px 14px; color: var(--ink);
+  .choices { display: flex; gap: 8px; margin-top: 8px; }
+  .choice { flex: 1 1 0; min-width: 0; border: 2px solid transparent; background: #fff; border-radius: 18px; padding: 14px 6px 12px; color: var(--ink);
     display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; }
-  .choice svg { width: 44px; height: 44px; }
-  .choice small { font-weight: 500; font-size: 12.5px; color: #6c675c; line-height: 1.3; }
+  .choice svg { width: 40px; height: 40px; flex: none; }
+  .choice span { font-size: 14px; line-height: 1.2; }
+  .choice small { font-weight: 500; font-size: 11.5px; color: #6c675c; line-height: 1.3; }
   .choice:active { border-color: var(--ink); }
   .bigscore { font-size: 54px; font-weight: 800; line-height: 1; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
 </style>
@@ -181,16 +187,6 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20h12"/><path d="M5.5 15.5 14 7a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L12 19H8.5l-3-3a.7.7 0 0 1 0-.5z"/><path d="m10 11 5 5"/></svg>
       Erase
     </button>
-    <button class="tool" data-tool="round" aria-label="Roundabout">
-      <span class="count zero" id="cRounds">0</span>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
-      Roundabout
-    </button>
-    <button class="tool" data-tool="motor" aria-label="Motorway">
-      <span class="count zero" id="cMotors">0</span>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 19 20 5"/><path d="M8 19 20 8.5" stroke-dasharray="2 3"/><circle cx="4" cy="19" r="2" fill="currentColor"/><circle cx="20" cy="5" r="2" fill="currentColor"/></svg>
-      Motorway
-    </button>
     <button class="tool" data-info="bridge" id="bridgeTool" aria-label="Bridges">
       <span class="count" id="cBridges">0</span>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10h20"/><path d="M4 10c2.5 4 13.5 4 16 0"/><path d="M7 10v9M17 10v9"/><path d="M2 20h3M10 20h4M19 20h3" stroke-width="1.6"/></svg>
@@ -200,6 +196,52 @@
       <span class="count" id="cTunnels">0</span>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20 9 6l4 5.5L16 8l6 12z"/><path d="M9 20v-2.5a3 3 0 0 1 6 0V20"/></svg>
       Tunnel
+    </button>
+    <!-- Upgrade tools: shown once you have picked one up this game -->
+    <button class="tool" data-tool="round" data-res="rounds" aria-label="Roundabout" hidden>
+      <span class="count" id="cRounds">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
+      Roundabout
+    </button>
+    <button class="tool" data-tool="motor" data-res="motors" aria-label="Motorway" hidden>
+      <span class="count" id="cMotors">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 19 20 5"/><path d="M8 19 20 8.5" stroke-dasharray="2 3"/><circle cx="4" cy="19" r="2" fill="currentColor"/><circle cx="20" cy="5" r="2" fill="currentColor"/></svg>
+      Motorway
+    </button>
+    <button class="tool" data-tool="oneway" data-res="oneways" aria-label="One-way street" hidden>
+      <span class="count">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18"/><path d="m15 6 6 6-6 6"/><path d="m8 8 4 4-4 4" stroke-width="1.8"/></svg>
+      One-way
+    </button>
+    <button class="tool" data-tool="overpass" data-res="overpasses" aria-label="Overpass" hidden>
+      <span class="count">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 2v20"/><path d="M2 9.5h20M2 14.5h20" stroke-width="1.8"/></svg>
+      Overpass
+    </button>
+    <button class="tool" data-tool="entrance" data-res="entrances" aria-label="Second entrance" hidden>
+      <span class="count">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"><rect x="7" y="4" width="10" height="10" rx="2"/><rect x="2.5" y="16" width="5" height="5" rx="1" fill="currentColor"/><rect x="16.5" y="16" width="5" height="5" rx="1" fill="currentColor"/></svg>
+      Entrance
+    </button>
+    <button class="tool" data-tool="carpark" data-res="carparks" aria-label="Bigger car park" hidden>
+      <span class="count">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M9.5 17V7h3.5a3 3 0 0 1 0 6H9.5"/></svg>
+      Car park
+    </button>
+    <button class="tool" data-tool="bus" data-res="buses" aria-label="Shuttle bus" hidden>
+      <span class="count">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="10" rx="3"/><path d="M6 10h2M11 10h2M16 10h2"/><circle cx="7" cy="18" r="1.6" fill="currentColor"/><circle cx="17" cy="18" r="1.6" fill="currentColor"/></svg>
+      Bus
+    </button>
+    <button class="tool" data-tool="dozer" data-res="dozers" aria-label="Bulldozer" hidden>
+      <span class="count">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="9" width="12" height="7" rx="1.5"/><path d="M4 7v11"/><path d="M4 12h4"/><circle cx="11" cy="19" r="1.6"/><circle cx="17" cy="19" r="1.6"/></svg>
+      Bulldozer
+    </button>
+    <button class="tool" data-tool="move" data-res="moves" aria-label="Move a house" hidden>
+      <span class="count">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14 8 10l5 4v6H3z" opacity=".45"/><path d="M11 8l5-4 5 4v6h-10z"/><path d="M6 7c1-3 3-4 5-4"/></svg>
+      Move
     </button>
   </div>
 </div>
@@ -227,7 +269,7 @@
       <li><span class="n">1</span><span>Drag your finger from a house to a building of the same colour to lay a road.</span></li>
       <li><span class="n">2</span><span>Buildings show white dots when they need visitors. A ring means a car is on its way.</span></li>
       <li><span class="n">3</span><span>If too many dots wait with no car coming, a timer fills. When it's full, the game ends. Traffic jams are what usually cause it.</span></li>
-      <li><span class="n">4</span><span>Road tiles run out. Each week you get more, plus an upgrade: bridges cross water, tunnels go through hills, roundabouts ease busy junctions, motorways jump straight between two points.</span></li>
+      <li><span class="n">4</span><span>Road tiles run out. Each week you get more, and you pick one of three upgrades, like roundabouts, motorways, one-way streets or overpasses. New tools appear in your toolbar, and tapping one tells you how to use it.</span></li>
       <li><span class="n">5</span><span>The crossed-out house at the top counts houses with no road to their building. They pulse on the map.</span></li>
       <li><span class="n">6</span><span>Reach a map's trip target to unlock the next, harder map.</span></li>
       <li><span class="n">7</span><span>Pause any time. You can still draw while paused. Pinch to zoom.</span></li>

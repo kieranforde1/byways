@@ -6,7 +6,7 @@
 //
 // To ship an update, change VERSION. Phones fetch this file when they open the
 // game online, see it changed, and download the new set in the background.
-const VERSION = 'v4';
+const VERSION = 'v5';
 const CACHE = 'byways-' + VERSION;
 const ASSETS = [
   './',

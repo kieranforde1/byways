@@ -45,6 +45,9 @@
   const WEEK_LEN = 70;
   const CARS_PER_HOUSE = 2;
   const MAX_SPAN = 6;           // longest bridge or tunnel, in tiles
+  const BUS_CAP = 4;            // visitors a shuttle bus carries per trip
+  const BUS_SPEED = 0.8;        // buses are a bit slower than cars
+  const BIG_PARK = 0.5;         // a bigger car park's gate works twice as fast
   const SQRT2 = Math.SQRT2;
   const SAVE_KEY = 'byways-save-v1';
   const BEST_KEY = 'byways-best';
@@ -108,9 +111,13 @@
   const fmt = (n) => n.toLocaleString("en-GB");
 
   // ---------------------------------------------------------------- grid helpers
+  // Graph nodes are tile indexes. An overpass tile has a second node for its
+  // upper deck: tile + G.N. It carries the east-west road over the north-south one.
   const idx = (x, y) => y * G.W + x;
   const tx = (i) => i % G.W;
-  const ty = (i) => (i / G.W) | 0;
+  const ty = (i) => ((i % G.N) / G.W) | 0;
+  const deck = (i) => i + G.N;
+  const isDeck = (n) => n >= G.N;
   const inMap = (x, y) => x >= 0 && y >= 0 && x < G.W && y < G.H;
   const inB = (x, y) => x >= G.bounds.x0 && x <= G.bounds.x1 && y >= G.bounds.y0 && y <= G.bounds.y1;
   const ekey = (a, b) => (a < b ? a * 65536 + b : b * 65536 + a);
@@ -133,6 +140,7 @@
   }
 
   function nodeValid(n) {
+    if (isDeck(n)) return !!G.overpass[n - G.N];
     if (G.road[n]) return true;
     const o = G.occ[n];
     return !!o && (o.kind === 'house' || o.kind === 'port');
@@ -177,17 +185,22 @@
       mount: new Uint8Array(N),
       road: new Uint8Array(N),
       round: new Uint8Array(N),
+      overpass: new Uint8Array(N),
       deco: new Uint8Array(N),
       occ: new Array(N).fill(null),
-      adj: Array.from({ length: N }, () => new Map()),
+      adj: Array.from({ length: N * 2 }, () => new Map()),
       edges: new Map(),
       queues: new Map(),
-      lock: new Float64Array(N),
+      lock: new Float64Array(N * 2),
       houses: [],
       dests: [],
       cars: [],
       fx: [],
-      res: { roads: 30, bridges: 1, tunnels: 0, rounds: 0, motors: 0 },
+      res: {
+        roads: 30, bridges: 1, tunnels: 0, rounds: 0, motors: 0,
+        oneways: 0, overpasses: 0, entrances: 0, carparks: 0, buses: 0, dozers: 0, moves: 0,
+      },
+      owned: {}, // upgrade tools picked up this game, so they stay in the toolbar
       bridgesUsed: 0,
       tunnelsUsed: 0,
       cutOff: 0,
@@ -322,15 +335,15 @@
     }
     if (!best) return null;
     const d = {
-      id: G.nextId++, color, x: best.x, y: best.y, port: best.port,
-      pins: 0, assigned: 0, overflow: 0, pinT: rnd(6, 9), born: G.time,
+      id: G.nextId++, color, x: best.x, y: best.y, ports: [best.port],
+      pins: 0, assigned: 0, overflow: 0, pinT: rnd(6, 9), born: G.time, bigPark: false,
     };
     for (const c of [idx(d.x, d.y), idx(d.x + 1, d.y), idx(d.x, d.y + 1), idx(d.x + 1, d.y + 1)]) {
       G.occ[c] = { kind: 'dest', d };
       G.deco[c] = 0;
     }
-    G.occ[d.port] = { kind: 'port', d };
-    G.deco[d.port] = 0;
+    G.occ[best.port] = { kind: 'port', d };
+    G.deco[best.port] = 0;
     G.dests.push(d);
     countCutOff();
     return d;
@@ -411,10 +424,11 @@
     return h;
   }
 
-  function addCar(h) {
+  function addCar(h, bus = false) {
     G.cars.push({
       id: G.nextId++, house: h, color: h.color, state: 'home', leg: null,
       path: null, s: 0, t: 0, len: 1, dk: -1, dest: null, timer: 0, wx: 0, wy: 0, ang: 0,
+      bus, cap: bus ? BUS_CAP : 1, load: 0,
     });
   }
 
@@ -476,6 +490,20 @@
     G.adj[b].delete(a);
     G.edges.delete(ekey(a, b));
     if (e.type === 'motor' && refund) G.res.motors++;
+    if (e.from !== undefined && refund) G.res.oneways++;
+  }
+
+  // Can a car drive from a to b? Roads are two-way unless made one-way.
+  function canGo(a, b) {
+    const e = G.adj[a].get(b);
+    return !!e && (e.from === undefined || e.from === a);
+  }
+
+  // The graph node a road enters when it reaches tile i from tile j.
+  // On an overpass, east-west traffic uses the upper deck.
+  function nodeFor(i, j) {
+    if (!G.overpass[i]) return i;
+    return ty(i) === ty(j) ? deck(i) : i;
   }
 
   // A bridge is a connected run of road tiles over water; a tunnel is the same
@@ -505,20 +533,32 @@
     return out;
   }
 
-  // Houses that can't reach any building of their colour.
+  // Houses that can't get to a building of their colour and back.
   function countCutOff() {
     const reach = new Uint8Array(G.N);
-    for (const d of G.dests) {
-      const seen = new Uint8Array(G.N);
-      const stack = [d.port];
-      seen[d.port] = 1;
+    const walk = (d, forward) => {
+      const seen = new Uint8Array(G.N * 2);
+      const stack = [...d.ports];
+      for (const p of d.ports) seen[p] = 1;
+      const got = [];
       while (stack.length) {
         const n = stack.pop();
         const o = G.occ[n];
-        if (o && o.kind === 'house') { if (o.h.color === d.color) reach[n] = 1; continue; }
-        if (o && n !== d.port) continue;
-        for (const m of G.adj[n].keys()) if (!seen[m]) { seen[m] = 1; stack.push(m); }
+        if (o && o.kind === 'house') { if (o.h.color === d.color) got.push(n); continue; }
+        if (o && o.kind !== 'port') continue;
+        if (o && o.d !== d) continue;
+        for (const m of G.adj[n].keys()) {
+          if (seen[m]) continue;
+          if (forward ? !canGo(n, m) : !canGo(m, n)) continue;
+          seen[m] = 1;
+          stack.push(m);
+        }
       }
+      return got;
+    };
+    for (const d of G.dests) {
+      const there = new Set(walk(d, false));
+      for (const n of walk(d, true)) if (there.has(n)) reach[n] = 1;
     }
     let n = 0;
     for (const h of G.houses) {
@@ -533,10 +573,12 @@
     const dx = qx - px, dy = qy - py;
     if (Math.max(Math.abs(dx), Math.abs(dy)) !== 1) return 'bad';
     if (!inB(px, py) || !inB(qx, qy)) return 'bounds';
-    if (G.adj[p].has(q)) return 'ok';
+    const diag = dx !== 0 && dy !== 0;
+    if (diag && (G.overpass[p] || G.overpass[q])) return 'bad';
+    const pn = nodeFor(p, q), qn = nodeFor(q, p);
+    if (G.adj[pn].has(qn)) return 'ok';
     const kp = kind(p), kq = kind(q);
     if (!kp || !kq) return 'bad';
-    const diag = dx !== 0 && dy !== 0;
     const special = (k) => k === 'house' || k === 'port';
     if (special(kp) || special(kq)) {
       if (diag) return 'bad';
@@ -555,9 +597,9 @@
     const setQ = kq === 'land' || kq === 'water' || kq === 'mount';
     if (setP) G.road[p] = 1;
     if (setQ) G.road[q] = 1;
-    addEdge(p, q, 'road');
+    addEdge(pn, qn, 'road');
     const undo = (why) => {
-      removeEdge(p, q, false);
+      removeEdge(pn, qn, false);
       if (setP) G.road[p] = 0;
       if (setQ) G.road[q] = 0;
       return why;
@@ -581,9 +623,11 @@
 
   function clearRoadTile(t) {
     for (const n of [...G.adj[t].keys()]) removeEdge(t, n);
+    for (const n of [...G.adj[deck(t)].keys()]) removeEdge(deck(t), n);
     G.road[t] = 0;
     if (!rough(t)) G.res.roads++;
     if (G.round[t]) { G.round[t] = 0; G.res.rounds++; }
+    if (G.overpass[t]) { G.overpass[t] = 0; G.res.overpasses++; }
   }
 
   function eraseAt(i) {
@@ -632,6 +676,115 @@
     return true;
   }
 
+  // ---------------------------------------------------------------- upgrades you place
+  const ORTHO = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+
+  function placeOverpass(i) {
+    if (!G.road[i] || rough(i) || G.round[i] || G.overpass[i] || G.occ[i]) { toast('Tap a crossroads, where four roads meet.'); return false; }
+    const x = tx(i), y = ty(i);
+    const arms = ORTHO.map(([dx, dy]) => (inMap(x + dx, y + dy) ? idx(x + dx, y + dy) : -1));
+    const ok = arms.every((n) => n >= 0 && G.adj[i].has(n) && G.adj[i].get(n).type === 'road') && G.adj[i].size === 4;
+    if (!ok) { toast('Overpasses go on a crossroads with four straight roads meeting.'); return false; }
+    G.overpass[i] = 1;
+    for (const n of [arms[2], arms[3]]) {
+      const e = G.adj[i].get(n);
+      const from = e.from;
+      removeEdge(i, n, false);
+      const ne = addEdge(deck(i), n, 'road');
+      if (from !== undefined) ne.from = from === i ? deck(i) : n;
+    }
+    G.res.overpasses--;
+    graphChanged();
+    return true;
+  }
+
+  // Make the road from a to b one-way in that direction. Doing it again the
+  // other way flips it for free.
+  function setOneWay(a, b) {
+    const e = G.adj[a].get(b);
+    if (!e || e.type !== 'road' || G.occ[a] || G.occ[b]) return 'bad';
+    if (e.from === a) return 'same';
+    if (e.from === undefined) {
+      if (G.res.oneways <= 0) return 'none';
+      G.res.oneways--;
+    }
+    e.from = a;
+    graphChanged();
+    return 'ok';
+  }
+
+  function addEntrance(t) {
+    if (!inB(tx(t), ty(t)) || !freeTile(t)) { toast('Tap an empty tile right next to a building.'); return false; }
+    let d = null;
+    for (const [dx, dy] of ORTHO) {
+      const x = tx(t) + dx, y = ty(t) + dy;
+      if (!inMap(x, y)) continue;
+      const o = G.occ[idx(x, y)];
+      if (o && o.kind === 'dest') d = o.d;
+    }
+    if (!d) { toast('Tap an empty tile right next to a building.'); return false; }
+    if (d.ports.length >= 3) { toast('That building already has three entrances.'); return false; }
+    G.occ[t] = { kind: 'port', d };
+    G.deco[t] = 0;
+    d.ports.push(t);
+    G.res.entrances--;
+    graphChanged();
+    return true;
+  }
+
+  function destAt(i) {
+    const o = G.occ[i];
+    return o && (o.kind === 'dest' || o.kind === 'port') ? o.d : null;
+  }
+
+  function enlargeCarPark(i) {
+    const d = destAt(i);
+    if (!d) { toast('Tap a building to give it a bigger car park.'); return false; }
+    if (d.bigPark) { toast('That building already has a big car park.'); return false; }
+    d.bigPark = true;
+    G.res.carparks--;
+    return true;
+  }
+
+  function makeBus(i) {
+    const o = G.occ[i];
+    if (!o || o.kind !== 'house') { toast('Tap a house to swap its cars for a shuttle bus.'); return false; }
+    const h = o.h;
+    if (h.bus) { toast('That house already has a bus.'); return false; }
+    h.bus = true;
+    for (const c of G.cars) {
+      if (c.house !== h) continue;
+      if (c.state === 'home') c.state = 'gone';
+      else c.retire = true;
+    }
+    G.cars = G.cars.filter((c) => c.state !== 'gone');
+    addCar(h, true);
+    G.res.buses--;
+    return true;
+  }
+
+  function bulldoze(i) {
+    if (!inB(tx(i), ty(i)) || !rough(i) || G.road[i]) { toast('Tap a hill or water tile with no road on it.'); return false; }
+    G.water[i] = 0;
+    G.mount[i] = 0;
+    G.res.dozers--;
+    G.fx.push({ type: 'poof', x: tx(i) + 0.5, y: ty(i) + 0.5, t: 0 });
+    return true;
+  }
+
+  function moveHouse(h, t) {
+    if (!houseSpotOK(t)) { toast('A house needs an empty tile with room for a road, away from buildings.'); return false; }
+    for (const n of [...G.adj[h.i].keys()]) removeEdge(h.i, n);
+    G.occ[h.i] = null;
+    h.i = t;
+    h.born = G.time;
+    G.occ[t] = { kind: 'house', h };
+    G.deco[t] = 0;
+    G.res.moves--;
+    graphChanged();
+    return true;
+  }
+
   function graphChanged() {
     G.bridgesUsed = spanInfo(G.water).count;
     G.tunnelsUsed = spanInfo(G.mount).count;
@@ -669,17 +822,21 @@
     return top;
   }
 
-  function dijkstra(src, stop = -1) {
-    const dist = new Float64Array(G.N).fill(Infinity);
-    const prev = new Int32Array(G.N).fill(-1);
-    dist[src] = 0;
-    const heap = [[0, src]];
+  // Shortest times *to* the targets, so the search walks roads backwards:
+  // stepping from u to v means a car would drive v -> u.
+  function dijkstra(targets, stop = -1) {
+    const list = Array.isArray(targets) ? targets : [targets];
+    const dist = new Float64Array(G.N * 2).fill(Infinity);
+    const prev = new Int32Array(G.N * 2).fill(-1);
+    const heap = [];
+    for (const t of list) { dist[t] = 0; heap.push([0, t]); }
     while (heap.length) {
       const [d, u] = heapPop(heap);
       if (d > dist[u]) continue;
       if (u === stop) break;
-      if (u !== src && G.occ[u]) continue; // houses and ports are ends only
+      if (d > 0 && G.occ[u]) continue; // houses and car parks are ends only
       for (const [v, e] of G.adj[u]) {
+        if (e.from !== undefined && e.from !== v) continue;
         let w = e.len / (e.type === 'motor' ? MOTOR_SPEED : CAR_SPEED);
         if (!G.occ[v] && G.adj[v].size >= 3) w += G.round[v] ? 0.08 : INTER_PENALTY;
         const nd = d + w;
@@ -690,21 +847,23 @@
   }
 
   function findPath(src, dst) {
-    if (src === dst) return [src];
-    const { dist, prev } = dijkstra(dst, src);
+    const targets = Array.isArray(dst) ? dst : [dst];
+    if (targets.includes(src)) return [src];
+    const { dist, prev } = dijkstra(targets, src);
     if (!isFinite(dist[src])) return null;
     const path = [];
     let n = src;
-    while (n !== -1) { path.push(n); if (n === dst) break; n = prev[n]; }
-    return path[path.length - 1] === dst ? path : null;
+    while (n !== -1) { path.push(n); if (targets.includes(n)) return path; n = prev[n]; }
+    return null;
   }
 
   function dispatch() {
     for (const d of G.dests) {
-      if (d.pins - d.assigned <= 0) continue;
-      const idle = G.cars.filter((c) => c.color === d.color && c.state === 'home');
+      const waiting = d.pins - d.assigned;
+      if (waiting <= 0) continue;
+      const idle = G.cars.filter((c) => c.color === d.color && c.state === 'home' && !c.retire);
       if (!idle.length) continue;
-      const { dist, prev } = dijkstra(d.port);
+      const { dist, prev } = dijkstra(d.ports);
       let best = null, bd = Infinity;
       for (const c of idle) {
         const v = dist[c.house.i];
@@ -713,14 +872,15 @@
       if (!best) continue;
       const path = [];
       let n = best.house.i;
-      while (n !== -1) { path.push(n); if (n === d.port) break; n = prev[n]; }
-      if (path[path.length - 1] !== d.port) continue;
+      while (n !== -1) { path.push(n); if (d.ports.includes(n)) break; n = prev[n]; }
+      if (!d.ports.includes(path[path.length - 1])) continue;
       best.leg = 'out';
       best.dest = d;
       best.path = path;
       best.s = 0;
       best.state = 'wait';
-      d.assigned++;
+      best.load = Math.min(best.cap, waiting);
+      d.assigned += best.load;
     }
   }
 
@@ -730,16 +890,28 @@
     if (!q) { q = []; G.queues.set(k, q); }
     return q;
   }
-  function edgeFree(a, b) {
-    const q = G.queues.get(dkey(a, b));
-    if (!q || !q.length) return true;
-    return q[q.length - 1].t >= GAP;
+  // A one-way road has two lanes going the same way, so it carries twice the cars.
+  const LANE2 = 2 ** 30;
+  function laneRoom(k) {
+    const q = G.queues.get(k);
+    return !q || !q.length ? Infinity : q[q.length - 1].t;
   }
-  function enterEdge(car, s) {
+  // Which lane a car can join on a -> b: 0, 1, or -1 when both are full.
+  function freeLane(a, b) {
+    const k = dkey(a, b);
+    const r0 = laneRoom(k);
+    const e = G.adj[a].get(b);
+    if (!e || e.from === undefined) return r0 >= GAP ? 0 : -1;
+    const r1 = laneRoom(k + LANE2);
+    if (Math.max(r0, r1) < GAP) return -1;
+    return r0 >= r1 ? 0 : 1;
+  }
+  function enterEdge(car, s, lane) {
     const a = car.path[s], b = car.path[s + 1];
     const e = G.adj[a].get(b);
     car.s = s; car.t = 0; car.len = e.len; car.motor = e.type === 'motor';
-    car.dk = dkey(a, b);
+    car.lane = lane;
+    car.dk = dkey(a, b) + (lane ? LANE2 : 0);
     queueOf(car.dk).push(car);
     car.state = 'drive';
   }
@@ -761,30 +933,46 @@
     const gate = !!o && o.kind === 'port';
     if (!gate && !isJunction(n)) return true;
     if (G.lock[n] > G.time) return false;
-    G.lock[n] = G.time + (gate ? GATE_CROSS
+    G.lock[n] = G.time + (gate ? GATE_CROSS * (o.d.bigPark ? BIG_PARK : 1)
       : G.round[n] ? ROUND_CROSS
       : CROSS + CROSS_PER_ARM * (G.adj[n].size - 3));
     return true;
   }
 
   function carTarget(car) {
-    return car.leg === 'out' ? car.dest.port : car.house.i;
+    return car.leg === 'out' ? car.dest.ports : car.house.i;
+  }
+
+  // Give up on the visit this car was heading to, so another car can take it.
+  function dropTrip(car) {
+    if (car.leg === 'out' && car.dest) car.dest.assigned = Math.max(0, car.dest.assigned - car.load);
+    car.dest = null;
+    car.load = 0;
+    car.leg = 'back';
+  }
+
+  function goneHome(car) {
+    car.state = car.retire ? 'gone' : 'home';
+    car.leg = null; car.path = null; car.dest = null; car.load = 0;
   }
 
   function poof(car) {
     const p = carPos(car);
     if (p) G.fx.push({ type: 'poof', x: p.x, y: p.y, t: 0 });
     leaveEdge(car);
-    if (car.leg === 'out' && car.dest) car.dest.assigned--;
-    car.state = 'home'; car.leg = null; car.path = null; car.dest = null;
+    dropTrip(car);
+    goneHome(car);
+  }
+
+  function pathOK(path, from) {
+    for (let k = from; k < path.length - 1; k++) if (!canGo(path[k], path[k + 1])) return false;
+    return true;
   }
 
   function replanFrom(car, node) {
     let np = findPath(node, carTarget(car));
     if (!np && car.leg === 'out') {
-      car.dest.assigned--;
-      car.dest = null;
-      car.leg = 'back';
+      dropTrip(car);
       np = findPath(node, car.house.i);
     }
     if (!np) { poof(car); return; }
@@ -804,15 +992,11 @@
         replanFrom(car, node);
         return;
       }
-      let broken = false;
-      for (let k = car.s + 1; k < car.path.length - 1; k++) {
-        if (!G.adj[car.path[k]].has(car.path[k + 1])) { broken = true; break; }
-      }
-      // also re-route if a quicker way has appeared, cheaply: only when broken
-      if (broken) {
+      // re-route only when the planned way is broken
+      if (!pathOK(car.path, car.s + 1) || !nodeValid(car.path[car.path.length - 1])) {
         let np = findPath(b, carTarget(car));
         if (!np && car.leg === 'out') {
-          car.dest.assigned--; car.dest = null; car.leg = 'back';
+          dropTrip(car);
           np = findPath(b, car.house.i);
         }
         if (!np) { poof(car); return; }
@@ -820,10 +1004,7 @@
         car.s = 0;
       }
     } else if (car.state === 'wait') {
-      let broken = car.leg === 'out' && !car.dest;
-      for (let k = 0; k < car.path.length - 1 && !broken; k++) {
-        if (!G.adj[car.path[k]].has(car.path[k + 1])) broken = true;
-      }
+      const broken = (car.leg === 'out' && !car.dest) || !pathOK(car.path, 0) || !nodeValid(car.path[car.path.length - 1]);
       if (broken || !nodeValid(car.path[0])) {
         if (!nodeValid(car.path[0])) { poof(car); return; }
         replanFrom(car, car.path[0]);
@@ -835,15 +1016,17 @@
     leaveEdge(car);
     if (car.leg === 'out') {
       const d = car.dest;
-      d.pins = Math.max(0, d.pins - 1);
-      d.assigned = Math.max(0, d.assigned - 1);
-      G.score++;
-      G.fx.push({ type: 'ring', x: tx(d.port) + 0.5, y: ty(d.port) + 0.5, t: 0, color: COLORS[d.color].fill });
+      const port = car.path[car.path.length - 1];
+      d.pins = Math.max(0, d.pins - car.load);
+      d.assigned = Math.max(0, d.assigned - car.load);
+      G.score += car.load;
+      car.load = 0;
+      G.fx.push({ type: 'ring', x: tx(port) + 0.5, y: ty(port) + 0.5, t: 0, color: COLORS[d.color].fill });
       car.state = 'park';
       car.timer = DWELL;
-      car.at = d.port;
+      car.at = port;
     } else {
-      car.state = 'home'; car.leg = null; car.path = null; car.dest = null;
+      goneHome(car);
     }
   }
 
@@ -866,14 +1049,15 @@
       case 'wait': {
         const a = car.path[0], b = car.path[1];
         if (b === undefined) { arrive(car); return; }
-        if (!G.adj[a].has(b)) { validateCar(car); return; }
-        if (!edgeFree(a, b)) return;
+        if (!canGo(a, b)) { validateCar(car); return; }
+        const lane = freeLane(a, b);
+        if (lane < 0) return;
         if (!passJunction(a)) return;
-        enterEdge(car, 0);
+        enterEdge(car, 0, lane);
         return;
       }
       case 'drive': {
-        const speed = car.motor ? MOTOR_SPEED : CAR_SPEED;
+        const speed = (car.motor ? MOTOR_SPEED : CAR_SPEED) * (car.bus ? BUS_SPEED : 1);
         const q = G.queues.get(car.dk);
         const qi = q ? q.indexOf(car) : -1;
         let lim = car.len;
@@ -886,11 +1070,12 @@
             return;
           }
           const a = car.path[s1], b = car.path[s1 + 1];
-          if (!G.adj[a].has(b)) { validateCar(car); return; }
-          if (!edgeFree(a, b)) return;
+          if (!canGo(a, b)) { validateCar(car); return; }
+          const lane = freeLane(a, b);
+          if (lane < 0) return;
           if (!passJunction(a)) return;
           leaveEdge(car);
-          enterEdge(car, s1);
+          enterEdge(car, s1, lane);
         }
         return;
       }
@@ -903,8 +1088,8 @@
       const ax = tx(a) + 0.5, ay = ty(a) + 0.5, bx = tx(b) + 0.5, by = ty(b) + 0.5;
       const f = clamp(car.t / car.len, 0, 1);
       const dx = (bx - ax) / car.len, dy = (by - ay) / car.len;
-      const off = car.motor ? 0.13 : 0.12;
-      // keep left
+      // keep left; the second lane of a one-way road is on the right
+      const off = (car.motor ? 0.13 : 0.12) * (car.lane ? -1 : 1);
       return { x: ax + (bx - ax) * f + dy * off, y: ay + (by - ay) * f - dx * off, ang: Math.atan2(dy, dx) };
     }
     if (car.state === 'wait' && car.path && !G.occ[car.path[0]]) {
@@ -954,6 +1139,7 @@
     if (G.dispatchT <= 0) { dispatch(); G.dispatchT = 0.25; }
 
     for (const c of G.cars) updateCar(c, dt);
+    if (G.cars.some((c) => c.state === 'gone')) G.cars = G.cars.filter((c) => c.state !== 'gone');
 
     for (const f of G.fx) f.t += dt;
     G.fx = G.fx.filter((f) => f.t < 0.8);
@@ -1038,25 +1224,48 @@
     motors: { label: 'Motorway', note: 'Fast straight link', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M8 40 40 8" stroke="#34353b" stroke-width="9"/><path d="M8 40 40 8" stroke="#f2d27a" stroke-width="1.6" stroke-dasharray="3 4"/></svg>' },
     roads: { label: '20 road tiles', note: 'More road to lay', n: 20, icon: '<svg viewBox="0 0 48 48" fill="none" stroke="#5a5b63" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 40V24h16V8h16"/></svg>' },
     tunnels: { label: 'Tunnel', note: 'Go through a hill', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 40 18 12l7 10 5-6 15 24z" fill="#c3b49a"/><path d="M15 40v-6a9 9 0 0 1 18 0v6z" fill="#3a332b"/><path d="M3 41h42" stroke="#5a5b63" stroke-width="4"/></svg>' },
+    oneways: { label: 'One-way streets', note: 'Two lanes going one way, for 6 stretches of road', n: 6, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M4 24h40" stroke="#5a5b63" stroke-width="14"/><path d="M12 18l6 6-6 6M24 18l6 6-6 6" stroke="#fff" stroke-width="3"/></svg>' },
+    overpasses: { label: 'Overpass', note: 'Lift one road over another at a crossroads', n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M24 4v40" stroke="#5a5b63" stroke-width="9"/><path d="M4 24h40" stroke="#2c2d33" stroke-width="13"/><path d="M4 24h40" stroke="#7a7b84" stroke-width="9"/></svg>' },
+    entrances: { label: 'Second entrance', note: 'Another way into a building', n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linejoin="round"><rect x="14" y="10" width="20" height="20" rx="4" fill="#e4572e"/><rect x="6" y="32" width="10" height="10" rx="2" fill="#9e3518"/><rect x="32" y="32" width="10" height="10" rx="2" fill="#9e3518"/></svg>' },
+    carparks: { label: 'Bigger car park', note: 'Cars get in and out of one building twice as fast', n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none"><rect x="6" y="6" width="36" height="36" rx="8" fill="#9e3518"/><path d="M19 34V14h7a6 6 0 0 1 0 12h-7" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>' },
+    buses: { label: 'Shuttle bus', note: `Swap one house's cars for a bus that carries ${BUS_CAP} visitors`, n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none"><rect x="4" y="14" width="40" height="18" rx="6" fill="#2a9d8f"/><path d="M10 19h6M20 19h6M30 19h6" stroke="#fff" stroke-width="4" stroke-linecap="round"/><circle cx="13" cy="34" r="4" fill="#24262c"/><circle cx="35" cy="34" r="4" fill="#24262c"/></svg>' },
+    dozers: { label: 'Bulldozer', note: 'Turn 3 hill or water tiles into land', n: 3, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M6 38 18 16l8 12 4-5 12 15z" fill="#c3b49a"/><rect x="18" y="26" width="18" height="10" rx="2" fill="#e9a93a"/><path d="M14 22v16" stroke="#5a5b63" stroke-width="4"/><circle cx="22" cy="40" r="3" fill="#24262c"/><circle cx="32" cy="40" r="3" fill="#24262c"/></svg>' },
+    moves: { label: 'Move a house', note: 'Pick up 2 houses and put them somewhere better', n: 2, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="24" width="14" height="14" rx="3" fill="#e4572e" opacity=".35"/><rect x="30" y="10" width="14" height="14" rx="3" fill="#e4572e"/><path d="M14 22c2-8 8-12 14-12M24 6l4 4-4 4" stroke="#5a5b63" stroke-width="3"/></svg>' },
   };
 
+  function upgradeKeys() {
+    return Object.keys(UPGRADES).filter((k) => k !== 'tunnels' || G.map.hills > 0);
+  }
+
+  // Three different choices. The basics turn up twice as often as the rest.
+  function pickUpgrades() {
+    const pool = upgradeKeys().map((k) => ({ k, w: UPGRADES[k].rare ? 1 : 2 }));
+    const out = [];
+    while (out.length < 3 && pool.length) {
+      let r = Math.random() * pool.reduce((s, p) => s + p.w, 0);
+      let i = 0;
+      while ((r -= pool[i].w) > 0) i++;
+      out.push(pool.splice(i, 1)[0].k);
+    }
+    return out;
+  }
+
   function showUpgrade() {
-    const keys = Object.keys(UPGRADES).filter((k) => k !== 'tunnels' || G.map.hills > 0);
-    const a = pick(keys);
-    let b = pick(keys);
-    while (b === a) b = pick(keys);
     $('#upTitle').textContent = `Week ${G.week}`;
     $('#upText').textContent = 'Your town is growing. You get 15 more road tiles, and you can pick one upgrade.';
     const box = $('#choices');
     box.innerHTML = '';
-    for (const k of [a, b]) {
+    for (const k of pickUpgrades()) {
       const u = UPGRADES[k];
       const btn = document.createElement('button');
       btn.className = 'choice';
       btn.innerHTML = `${u.icon}<span>${u.label}</span><small>${u.note}</small>`;
       btn.addEventListener('click', () => {
         G.res[k] += u.n;
+        G.owned[k] = true;
+        hudCache = '';
         closeScreen();
+        measure();
         save();
       });
       box.appendChild(btn);
@@ -1067,20 +1276,21 @@
   // ---------------------------------------------------------------- save / load
   function save() {
     if (!G || G.over || G.demo) return;
-    const roads = [], water = [], mount = [], rounds = [], deco = [];
+    const roads = [], water = [], mount = [], rounds = [], deco = [], overpass = [];
     for (let i = 0; i < G.N; i++) {
       if (G.road[i]) roads.push(i);
       if (G.water[i]) water.push(i);
       if (G.mount[i]) mount.push(i);
       if (G.round[i]) rounds.push(i);
+      if (G.overpass[i]) overpass.push(i);
       if (G.deco[i]) deco.push(i, G.deco[i]);
     }
     const data = {
-      v: 2, map: G.map.id, targetHit: G.targetHit, W: G.W, H: G.H, roads, water, mount, rounds, deco,
-      edges: [...G.edges.values()].map((e) => [e.a, e.b, e.type === 'motor' ? 1 : 0]),
-      houses: G.houses.map((h) => [h.i, h.color]),
-      dests: G.dests.map((d) => [d.x, d.y, d.port, d.color, d.pins, d.overflow, d.pinT]),
-      res: G.res, time: G.time, week: G.week, weekT: G.weekT, score: G.score,
+      v: 3, map: G.map.id, targetHit: G.targetHit, W: G.W, H: G.H, roads, water, mount, rounds, overpass, deco,
+      edges: [...G.edges.values()].map((e) => [e.a, e.b, e.type === 'motor' ? 1 : 0, e.from === undefined ? -1 : e.from]),
+      houses: G.houses.map((h) => [h.i, h.color, h.bus ? 1 : 0]),
+      dests: G.dests.map((d) => [d.x, d.y, d.ports, d.color, d.pins, d.overflow, d.pinT, d.bigPark ? 1 : 0]),
+      res: G.res, owned: G.owned, time: G.time, week: G.week, weekT: G.weekT, score: G.score,
       bounds: G.bounds, colorsUsed: G.colorsUsed, nextHouse: G.nextHouse, nextDest: G.nextDest,
       speed: G.speed,
     };
@@ -1090,7 +1300,7 @@
   function load() {
     let data;
     try { data = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { data = null; }
-    if (!data || (data.v !== 1 && data.v !== 2)) return false;
+    if (!data || ![1, 2, 3].includes(data.v)) return false;
     G = blankState(data.W, data.H);
     G.map = MAPS.find((m) => m.id === data.map) || MAPS[0];
     G.targetHit = !!data.targetHit;
@@ -1098,21 +1308,28 @@
     for (const i of data.mount || []) G.mount[i] = 1;
     for (const i of data.roads) G.road[i] = 1;
     for (const i of data.rounds) G.round[i] = 1;
+    for (const i of data.overpass || []) G.overpass[i] = 1;
     for (let k = 0; k < data.deco.length; k += 2) G.deco[data.deco[k]] = data.deco[k + 1];
-    for (const [a, b, m] of data.edges) addEdge(a, b, m ? 'motor' : 'road');
-    for (const [x, y, port, color, pins, overflow, pinT] of data.dests) {
-      const d = { id: G.nextId++, color, x, y, port, pins, assigned: 0, overflow, pinT, born: -10 };
+    for (const [a, b, m, from] of data.edges) {
+      const e = addEdge(a, b, m ? 'motor' : 'road');
+      if (from !== undefined && from >= 0) e.from = from;
+    }
+    for (const [x, y, ports, color, pins, overflow, pinT, bigPark] of data.dests) {
+      const list = Array.isArray(ports) ? ports : [ports];
+      const d = { id: G.nextId++, color, x, y, ports: list, pins, assigned: 0, overflow, pinT, born: -10, bigPark: !!bigPark };
       for (const c of [idx(x, y), idx(x + 1, y), idx(x, y + 1), idx(x + 1, y + 1)]) G.occ[c] = { kind: 'dest', d };
-      G.occ[port] = { kind: 'port', d };
+      for (const p of list) G.occ[p] = { kind: 'port', d };
       G.dests.push(d);
     }
-    for (const [i, color] of data.houses) {
-      const h = { id: G.nextId++, color, i, born: -10 };
+    for (const [i, color, bus] of data.houses) {
+      const h = { id: G.nextId++, color, i, born: -10, bus: !!bus };
       G.occ[i] = { kind: 'house', h };
       G.houses.push(h);
-      for (let k = 0; k < CARS_PER_HOUSE; k++) addCar(h);
+      if (h.bus) addCar(h, true);
+      else for (let k = 0; k < CARS_PER_HOUSE; k++) addCar(h);
     }
     Object.assign(G.res, data.res);
+    G.owned = data.owned || {};
     Object.assign(G, {
       time: data.time, week: data.week, weekT: data.weekT, score: data.score, bounds: data.bounds,
       colorsUsed: data.colorsUsed, nextHouse: data.nextHouse, nextDest: data.nextDest, speed: data.speed || 1,
@@ -1227,6 +1444,49 @@
     a.last = c;
   }
 
+  // Drag along a road in the direction traffic should flow.
+  function onewayMove(wx, wy, a) {
+    const c = tileAtWorld(wx, wy);
+    if (c < 0 || c === a.last) return;
+    if (a.last < 0) { a.last = c; return; }
+    const cx = tx(c) + 0.5, cy = ty(c) + 0.5;
+    const cheb = Math.max(Math.abs(tx(c) - tx(a.last)), Math.abs(ty(c) - ty(a.last)));
+    if (cheb <= 1 && Math.hypot(wx - cx, wy - cy) > 0.46) return;
+    let cur = a.last, guard = 0;
+    while (cur !== c && guard++ < 64) {
+      const nx = stepToward(cur, c);
+      const r = setOneWay(nodeFor(cur, nx), nodeFor(nx, cur));
+      if (r === 'ok') a.changed = true;
+      if (r === 'none' && !a.warned) { toast('No one-way streets left.'); a.warned = true; }
+      cur = nx;
+    }
+    a.last = c;
+  }
+
+  let moveFrom = null;
+
+  // Taps for the upgrade tools. Each returns to the road tool once used up.
+  function tapTool(t, c) {
+    const done = (key) => { if (G.res[key] <= 0) setTool('road'); };
+    if (t === 'overpass') { if (placeOverpass(c)) done('overpasses'); }
+    else if (t === 'entrance') { if (addEntrance(c)) done('entrances'); }
+    else if (t === 'carpark') { if (enlargeCarPark(c)) done('carparks'); }
+    else if (t === 'bus') { if (makeBus(c)) done('buses'); }
+    else if (t === 'dozer') { if (bulldoze(c)) done('dozers'); }
+    else if (t === 'move') {
+      const o = G.occ[c];
+      if (!moveFrom) {
+        if (o && o.kind === 'house') { moveFrom = o.h; toast('Now tap where the house should go.'); }
+        else toast('Tap the house you want to move.');
+      } else if (o && o.kind === 'house') {
+        moveFrom = o.h === moveFrom ? null : o.h;
+      } else if (moveHouse(moveFrom, c)) {
+        moveFrom = null;
+        done('moves');
+      }
+    }
+  }
+
   function resetTouches() {
     pointers.clear();
     action = null;
@@ -1249,6 +1509,8 @@
         if (c >= 0 && kind(c) !== null && inB(tx(c), ty(c))) action.last = c;
       } else if (tool === 'erase') {
         eraseMove(wx, wy, action);
+      } else if (tool === 'oneway') {
+        onewayMove(wx, wy, action);
       }
     } else if (pointers.size === 2) {
       action = null;
@@ -1291,6 +1553,7 @@
       const wx = wxOf(ev.clientX), wy = wyOf(ev.clientY);
       if (action.tool === 'road') roadMove(wx, wy, action);
       else if (action.tool === 'erase') eraseMove(wx, wy, action);
+      else if (action.tool === 'oneway') onewayMove(wx, wy, action);
     }
   }
 
@@ -1302,9 +1565,12 @@
     if (!action) return;
     const a = action;
     action = null;
+    if (a.tool === 'oneway' && a.changed && G.res.oneways <= 0) setTool('road');
     if (a.moved || e.type === 'pointercancel') return;
     const c = tileAtWorld(wxOf(e.clientX), wyOf(e.clientY));
     if (c < 0) return;
+    if (a.tool === 'oneway') toast('Drag along a road in the direction cars should go.');
+    else tapTool(a.tool, c);
     if (a.tool === 'round') {
       if (placeRoundabout(c) && G.res.rounds <= 0) setTool('road');
     } else if (a.tool === 'motor') {
@@ -1480,6 +1746,21 @@
     ctx.beginPath();
     for (const e of roadEdges) line(e);
     ctx.stroke();
+    // one-way arrows
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.lineWidth = Math.max(1.2, s * 0.06);
+    for (const e of roadEdges) {
+      if (e.from === undefined) continue;
+      const to = e.from === e.a ? e.b : e.a;
+      const ax = tx(e.from) + 0.5, ay = ty(e.from) + 0.5, bx = tx(to) + 0.5, by = ty(to) + 0.5;
+      ctx.save();
+      ctx.translate(sx((ax + bx) / 2), sy((ay + by) / 2));
+      ctx.rotate(Math.atan2(by - ay, bx - ax));
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.1, -s * 0.12); ctx.lineTo(s * 0.05, 0); ctx.lineTo(-s * 0.1, s * 0.12);
+      ctx.stroke();
+      ctx.restore();
+    }
     // lone road tiles and node caps
     ctx.fillStyle = PAL.road;
     for (let y = vy0; y <= vy1; y++) {
@@ -1502,6 +1783,19 @@
         ctx.beginPath(); ctx.arc(cx, cy, s * 0.45, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = '#a9c58a';
         ctx.beginPath(); ctx.arc(cx, cy, s * 0.17, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    // overpasses: the east-west road on a raised deck
+    for (let y = vy0; y <= vy1; y++) {
+      for (let x = vx0; x <= vx1; x++) {
+        if (!G.overpass[idx(x, y)]) continue;
+        const x0 = sx(x) - s * 0.15, w = s * 1.3, yc = sy(y + 0.5);
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillRect(x0, yc - s * 0.3 + s * 0.12, w, s * 0.6);
+        ctx.fillStyle = '#2c2d33';
+        ctx.fillRect(x0, yc - s * 0.36, w, s * 0.72);
+        ctx.fillStyle = '#6d6e77';
+        ctx.fillRect(x0, yc - s * 0.28, w, s * 0.56);
       }
     }
 
@@ -1588,7 +1882,13 @@
       ctx.lineWidth = Math.max(1.5, s * 0.06);
       ctx.beginPath(); ctx.arc(sx(tx(action.last) + 0.5), sy(ty(action.last) + 0.5), s * 0.46, 0, Math.PI * 2); ctx.stroke();
     }
-    if (hoverTile >= 0 && !action && (tool === 'round' || tool === 'motor' || tool === 'erase')) {
+    if (tool === 'move' && moveFrom) {
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
+      ctx.strokeStyle = COLORS[moveFrom.color].dark;
+      ctx.lineWidth = s * 0.1;
+      ctx.beginPath(); ctx.arc(sx(tx(moveFrom.i) + 0.5), sy(ty(moveFrom.i) + 0.5), s * (0.5 + pulse * 0.1), 0, Math.PI * 2); ctx.stroke();
+    }
+    if (hoverTile >= 0 && !action && tool !== 'road') {
       ctx.strokeStyle = 'rgba(36,38,44,0.3)';
       ctx.lineWidth = 1.5;
       ctx.strokeRect(sx(tx(hoverTile)) + 1, sy(ty(hoverTile)) + 1, s - 2, s - 2);
@@ -1617,7 +1917,7 @@
       ctx.save();
       ctx.translate(sx(p.x), sy(p.y));
       ctx.rotate(p.ang);
-      const L = s * 0.36, Wd = s * 0.21;
+      const L = s * (c.bus ? 0.6 : 0.36), Wd = s * (c.bus ? 0.25 : 0.21);
       ctx.fillStyle = col.dark;
       rr(-L / 2 - 1, -Wd / 2 - 1, L + 2, Wd + 2, Wd * 0.4);
       ctx.fill();
@@ -1625,7 +1925,11 @@
       rr(-L / 2, -Wd / 2, L, Wd, Wd * 0.35);
       ctx.fill();
       ctx.fillStyle = 'rgba(255,255,255,0.55)';
-      ctx.fillRect(L * 0.08, -Wd * 0.32, L * 0.16, Wd * 0.64);
+      if (c.bus) {
+        for (let k = 0; k < 3; k++) ctx.fillRect(-L * 0.36 + k * L * 0.26, -Wd * 0.3, L * 0.16, Wd * 0.6);
+      } else {
+        ctx.fillRect(L * 0.08, -Wd * 0.32, L * 0.16, Wd * 0.64);
+      }
       ctx.restore();
     }
   }
@@ -1679,17 +1983,25 @@
     const col = COLORS[d.color];
     const cx = sx(d.x + 1), cy = sy(d.y + 1);
     const w = s * 1.76 * k;
-    // port lot
-    const px = sx(tx(d.port) + 0.5), py = sy(ty(d.port) + 0.5);
-    ctx.fillStyle = col.dark;
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py); ctx.lineWidth = s * 0.5; ctx.strokeStyle = col.dark; ctx.stroke();
-    rr(px - s * 0.36, py - s * 0.36, s * 0.72, s * 0.72, s * 0.14);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.font = `700 ${Math.round(s * 0.42)}px ui-rounded, -apple-system, system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('P', px, py + s * 0.02);
+    // car park entrances
+    for (const port of d.ports) {
+      const px = sx(tx(port) + 0.5), py = sy(ty(port) + 0.5);
+      ctx.fillStyle = col.dark;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py); ctx.lineWidth = s * 0.5; ctx.strokeStyle = col.dark; ctx.stroke();
+      rr(px - s * 0.36, py - s * 0.36, s * 0.72, s * 0.72, s * 0.14);
+      ctx.fill();
+      if (d.bigPark) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+        ctx.lineWidth = Math.max(1, s * 0.05);
+        rr(px - s * 0.28, py - s * 0.28, s * 0.56, s * 0.56, s * 0.1);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.font = `700 ${Math.round(s * (d.bigPark ? 0.34 : 0.42))}px ui-rounded, -apple-system, system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('P', px, py + s * 0.02);
+    }
 
     const waiting = Math.max(0, d.pins - d.assigned);
     const over = waiting > PIN_LIMIT;
@@ -1750,8 +2062,8 @@
   function updateHud() {
     if (!G) return;
     const zoomed = user.zoom > 1.02;
-    const key = [G.score, G.week, Math.floor(G.weekT), G.res.roads, G.res.rounds, G.res.motors, G.res.bridges - G.bridgesUsed,
-      G.res.tunnels - G.tunnelsUsed, G.cutOff, G.targetHit, zoomed, G.map.id, G.paused, G.speed, tool].join('|');
+    const key = [G.score, G.week, Math.floor(G.weekT), JSON.stringify(G.res), Object.keys(G.owned).join(), G.bridgesUsed,
+      G.tunnelsUsed, G.cutOff, G.targetHit, zoomed, G.map.id, G.paused, G.speed, tool].join('|');
     el.weekBar.style.width = (G.weekT / WEEK_LEN * 100).toFixed(1) + '%';
     if (key === hudCache) return;
     hudCache = key;
@@ -1764,10 +2076,17 @@
     el.weekLabel.textContent = `Week ${G.week}`;
     el.cRoads.textContent = G.res.roads;
     el.cRoads.classList.toggle('zero', G.res.roads === 0);
-    el.cRounds.textContent = G.res.rounds;
-    el.cRounds.classList.toggle('zero', G.res.rounds === 0);
-    el.cMotors.textContent = G.res.motors;
-    el.cMotors.classList.toggle('zero', G.res.motors === 0);
+    // upgrade tools only appear once you've picked them up this game
+    let shown = 3 + (G.map.hills ? 1 : 0);
+    document.querySelectorAll('.tool[data-res]').forEach((b) => {
+      const k = b.dataset.res;
+      const n = G.res[k];
+      const count = b.querySelector('.count');
+      count.textContent = n;
+      count.classList.toggle('zero', n === 0);
+      b.hidden = !(G.owned[k] || n > 0);
+      if (!b.hidden) shown++;
+    });
     const bridgesLeft = Math.max(0, G.res.bridges - G.bridgesUsed);
     const tunnelsLeft = Math.max(0, G.res.tunnels - G.tunnelsUsed);
     el.cBridges.textContent = bridgesLeft;
@@ -1775,12 +2094,25 @@
     el.cTunnels.textContent = tunnelsLeft;
     el.cTunnels.classList.toggle('zero', tunnelsLeft === 0);
     el.tunnelTool.hidden = !G.map.hills;
-    el.bottom.querySelector('.toolbar').classList.toggle('six', !!G.map.hills);
+    const bar = el.bottom.querySelector('.toolbar');
+    const wasCompact = bar.classList.contains('six');
+    bar.classList.toggle('six', shown > 5);
+    if (wasCompact !== shown > 5 || bar.dataset.shown !== String(shown)) { bar.dataset.shown = shown; measure(); }
+    scrollHint();
     el.btnPause.innerHTML = G.paused ? ICON_PLAY : ICON_PAUSE;
     el.btnPause.setAttribute('aria-label', G.paused ? 'Play' : 'Pause');
     el.btnSpeed.textContent = G.speed === 1 ? '1×' : '2×';
     document.querySelectorAll('.tool').forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
   }
+
+  // Fade the toolbar's edge when there are more tools to scroll to.
+  function scrollHint() {
+    const bar = el.bottom.querySelector('.toolbar');
+    const sideways = getComputedStyle(bar).flexDirection === 'row';
+    bar.classList.toggle('more-start', sideways && bar.scrollLeft > 2);
+    bar.classList.toggle('more-end', sideways && bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 2);
+  }
+  el.bottom.querySelector('.toolbar').addEventListener('scroll', scrollHint, { passive: true });
 
   let toastTimer = 0;
   function toast(msg) {
@@ -1799,6 +2131,7 @@
   function setTool(t) {
     tool = t;
     motorStart = -1;
+    moveFrom = null;
     hudCache = '';
   }
 
@@ -1806,12 +2139,30 @@
     if (b.dataset.info === 'bridge') { toast('Bridges are used automatically. Draw a road across water.'); return; }
     if (b.dataset.info === 'tunnel') { toast('Tunnels are used automatically. Draw a road through a hill.'); return; }
     const t = b.dataset.tool;
-    if (t === 'round' && G.res.rounds <= 0) { toast('No roundabouts yet. You can pick them at the end of a week.'); return; }
-    if (t === 'motor' && G.res.motors <= 0) { toast('No motorways yet. You can pick them at the end of a week.'); return; }
+    const k = b.dataset.res;
+    if (k && G.res[k] <= 0) {
+      if (t === 'oneway' && tool !== 'oneway') { setTool(t); toast('No one-way streets left, but you can still flip existing ones.'); return; }
+      const names = {
+        rounds: 'roundabouts', motors: 'motorways', overpasses: 'overpasses', entrances: 'entrances',
+        carparks: 'car park upgrades', buses: 'buses', dozers: 'bulldozer uses', moves: 'house moves',
+      };
+      toast(`No ${names[k]} left. You can pick more at the end of a week.`);
+      return;
+    }
     setTool(t);
-    if (t === 'round') toast('Tap a junction to add a roundabout.');
-    if (t === 'motor') toast('Tap where the motorway should start.');
-    if (t === 'erase') toast('Drag over roads to remove them. You get the tiles back.');
+    const hints = {
+      round: 'Tap a junction to add a roundabout.',
+      motor: 'Tap where the motorway should start.',
+      erase: 'Drag over roads to remove them. You get the tiles back.',
+      oneway: 'Drag along a road in the direction cars should go. Drag the other way to flip it.',
+      overpass: 'Tap a crossroads. The east-west road goes over the top.',
+      entrance: 'Tap an empty tile next to a building to add another entrance.',
+      carpark: 'Tap a building to give it a bigger car park.',
+      bus: 'Tap a house to swap its two cars for a bus.',
+      dozer: 'Tap a hill or water tile to turn it into land.',
+      move: 'Tap a house, then tap where it should go.',
+    };
+    if (hints[t]) toast(hints[t]);
   }));
 
   el.btnPause.addEventListener('click', () => { if (!G) return; G.paused = !G.paused; hudCache = ''; if (G.paused) toast('Paused. You can still draw roads.'); });
@@ -1997,5 +2348,5 @@
   requestAnimationFrame(frame);
 
   // exposed for testing in the browser console
-  window.__byways = { get G() { return G; }, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress };
+  window.__byways = { get G() { return G; }, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress, placeOverpass, setOneWay, addEntrance, enlargeCarPark, makeBus, bulldoze, moveHouse, canGo, nodeFor, deck, showUpgrade, dispatch };
 })();
