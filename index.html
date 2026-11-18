@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Byways">
+<meta name="theme-color" content="#24262c">
+<meta name="description" content="Draw roads so every car gets where it's going. Works offline.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<title>Byways</title>
+<style>
+  :root {
+    --ink: #24262c;
+    --ink-2: #3a3d45;
+    --paper: #f4eee2;
+    --paper-2: #e8dfcd;
+    --muted: #8b8577;
+    --accent: #e4572e;
+    --ok: #2a9d8f;
+    --font: ui-rounded, "SF Pro Rounded", -apple-system, system-ui, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  [hidden] { display: none !important; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: var(--ink); color: var(--paper);
+    font-family: var(--font); -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    overscroll-behavior: none;
+  }
+  body { position: fixed; inset: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; display: block; }
+  button { font-family: inherit; touch-action: manipulation; cursor: pointer; }
+
+  .bar { position: absolute; left: 0; right: 0; display: flex; align-items: center; gap: 8px; pointer-events: none; }
+  .bar > * { pointer-events: auto; }
+  #top {
+    top: 0; padding: calc(env(safe-area-inset-top) + 8px) calc(env(safe-area-inset-right) + 12px) 8px calc(env(safe-area-inset-left) + 12px);
+    justify-content: space-between;
+  }
+  #bottom {
+    bottom: 0; padding: 8px calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 8px) calc(env(safe-area-inset-left) + 8px);
+    justify-content: center;
+  }
+  .pill { background: rgba(36,38,44,.86); border-radius: 999px; padding: 6px 12px; display: flex; align-items: center; gap: 8px;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+  .score b { font-size: 20px; font-variant-numeric: tabular-nums; }
+  .score small { color: #b9b2a3; font-size: 13px; }
+  .week { flex-direction: column; gap: 4px; align-items: stretch; padding: 6px 14px; }
+  .week span { font-size: 13px; font-weight: 600; text-align: center; }
+  .prog { width: 84px; height: 4px; border-radius: 2px; background: #4a4d56; overflow: hidden; }
+  .prog i { display: block; height: 100%; width: 0; background: var(--paper); border-radius: 2px; }
+  .ctrls { padding: 4px; gap: 2px; }
+  .icon-btn { width: 36px; height: 36px; border: 0; border-radius: 50%; background: transparent; color: var(--paper);
+    display: grid; place-items: center; font-size: 14px; font-weight: 700; }
+  .icon-btn:active { background: #4a4d56; }
+  .icon-btn svg { width: 18px; height: 18px; }
+
+  .toolbar { background: rgba(36,38,44,.9); border-radius: 22px; padding: 6px; display: flex; gap: 4px;
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
+  .tool { position: relative; width: 62px; height: 58px; border: 0; border-radius: 16px; background: transparent; color: #cfc8b8;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 10.5px; font-weight: 600; }
+  .tool svg { width: 24px; height: 24px; }
+  .tool.active { background: var(--paper); color: var(--ink); }
+  .tool:disabled { opacity: .35; }
+  .tool .count { position: absolute; top: 3px; right: 5px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+    background: var(--accent); color: #fff; font-size: 11px; line-height: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tool .count.zero { background: #555862; }
+  .tool.flash .count { animation: flash .5s 2; }
+  @keyframes flash { 50% { transform: scale(1.35); background: #ff2d2d; } }
+  .badge { width: 54px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #cfc8b8; font-size: 10.5px; font-weight: 600; gap: 3px; }
+  .badge b { font-size: 17px; color: var(--paper); }
+  .badge.flash b { animation: flashText .5s 2; }
+  @keyframes flashText { 50% { color: #ff4d4d; transform: scale(1.3); } }
+
+  @media (orientation: landscape) and (max-height: 540px) {
+    #top { padding-top: calc(env(safe-area-inset-top) + 6px); padding-bottom: 0; }
+    #bottom { top: 0; bottom: 0; left: auto; right: 0; flex-direction: column; justify-content: center;
+      padding: calc(env(safe-area-inset-top) + 56px) calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 8px) 8px; }
+    .toolbar { flex-direction: column; border-radius: 20px; }
+    .tool { width: 62px; height: 46px; font-size: 9.5px; gap: 1px; }
+    .tool svg { width: 21px; height: 21px; }
+    .badge { width: 62px; height: 40px; gap: 0; }
+  }
+  #toast { position: absolute; left: 50%; top: calc(env(safe-area-inset-top) + 64px); transform: translateX(-50%) translateY(-8px);
+    background: var(--paper); color: var(--ink); padding: 8px 14px; border-radius: 12px; font-size: 14px; font-weight: 600;
+    opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; max-width: 86vw; text-align: center; }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .screen { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px;
+    padding-top: calc(env(safe-area-inset-top) + 24px); padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
+    background: rgba(24,25,30,.62); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
+  .screen.show { display: flex; }
+  .card { background: var(--paper); color: var(--ink); border-radius: 24px; padding: 26px 22px 22px; width: 100%; max-width: 360px;
+    max-height: 100%; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,.35); text-align: center; }
+  .card h1 { font-size: 40px; margin: 0 0 4px; letter-spacing: -0.5px; }
+  .card h2 { font-size: 26px; margin: 0 0 6px; }
+  .card p { margin: 0 0 14px; line-height: 1.4; color: #4d4a42; font-size: 15px; }
+  .card .lede { font-size: 16px; color: #5d594f; }
+  .btn { display: block; width: 100%; border: 0; border-radius: 14px; padding: 14px; font-size: 17px; font-weight: 700; margin-top: 10px;
+    background: var(--ink); color: var(--paper); }
+  .btn.secondary { background: var(--paper-2); color: var(--ink); }
+  .btn:active { transform: scale(.98); }
+  .small { font-size: 13px !important; color: var(--muted) !important; margin: 14px 0 0 !important; }
+  .offline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--muted); margin-top: 16px; }
+  .offline i { width: 8px; height: 8px; border-radius: 50%; background: #c9b98f; display: inline-block; }
+  .offline.ready { color: var(--ok); }
+  .offline.ready i { background: var(--ok); }
+  .steps { text-align: left; margin: 8px 0 6px; padding: 0; list-style: none; }
+  .steps li { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 12px; font-size: 15px; line-height: 1.4; color: #3d3a33; }
+  .steps li span.n { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--ink); color: var(--paper); font-size: 13px;
+    font-weight: 700; display: grid; place-items: center; margin-top: 1px; }
+  .choices { display: flex; gap: 10px; margin-top: 8px; }
+  .choice { flex: 1; border: 2px solid transparent; background: #fff; border-radius: 18px; padding: 16px 8px 14px; color: var(--ink);
+    display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; }
+  .choice svg { width: 44px; height: 44px; }
+  .choice small { font-weight: 500; font-size: 12.5px; color: #6c675c; line-height: 1.3; }
+  .choice:active { border-color: var(--ink); }
+  .bigscore { font-size: 54px; font-weight: 800; line-height: 1; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="top" class="bar" hidden>
+  <div class="pill score"><b id="score">0</b><small>trips</small></div>
+  <div class="pill week"><span id="weekLabel">Week 1</span><div class="prog"><i id="weekBar"></i></div></div>
+  <div class="pill ctrls">
+    <button class="icon-btn" id="btnPause" aria-label="Pause"></button>
+    <button class="icon-btn" id="btnSpeed" aria-label="Speed">1×</button>
+    <button class="icon-btn" id="btnMenu" aria-label="Menu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </div>
+</div>
+
+<div id="bottom" class="bar" hidden>
+  <div class="toolbar">
+    <button class="tool active" data-tool="road" aria-label="Road">
+      <span class="count" id="cRoads">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20c0-6 3-8 7-8s7-2 7-8"/><circle cx="5" cy="20" r="1.4" fill="currentColor"/><circle cx="19" cy="4" r="1.4" fill="currentColor"/></svg>
+      Road
+    </button>
+    <button class="tool" data-tool="erase" aria-label="Erase">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20h12"/><path d="M5.5 15.5 14 7a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L12 19H8.5l-3-3a.7.7 0 0 1 0-.5z"/><path d="m10 11 5 5"/></svg>
+      Erase
+    </button>
+    <button class="tool" data-tool="round" aria-label="Roundabout">
+      <span class="count zero" id="cRounds">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
+      Roundabout
+    </button>
+    <button class="tool" data-tool="motor" aria-label="Motorway">
+      <span class="count zero" id="cMotors">0</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 19 20 5"/><path d="M8 19 20 8.5" stroke-dasharray="2 3"/><circle cx="4" cy="19" r="2" fill="currentColor"/><circle cx="20" cy="5" r="2" fill="currentColor"/></svg>
+      Motorway
+    </button>
+    <div class="badge" id="bridgeBadge"><b id="cBridges">0</b>Bridges</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<!-- Title -->
+<div class="screen" id="sTitle">
+  <div class="card">
+    <h1>Byways</h1>
+    <p class="lede">Draw roads so every car gets where it's going.</p>
+    <button class="btn" id="btnContinue" hidden>Continue</button>
+    <button class="btn" id="btnNew">New game</button>
+    <button class="btn secondary" id="btnHowTitle">How to play</button>
+    <p class="small" id="bestLine"></p>
+    <div class="offline" id="offline"><i></i><span>Checking offline play…</span></div>
+  </div>
+</div>
+
+<!-- How to play -->
+<div class="screen" id="sHelp">
+  <div class="card">
+    <h2>How to play</h2>
+    <ul class="steps">
+      <li><span class="n">1</span><span>Drag your finger from a house to a building of the same colour to lay a road.</span></li>
+      <li><span class="n">2</span><span>Buildings show white dots when they need visitors. Cars leave home to fill them.</span></li>
+      <li><span class="n">3</span><span>If a building has too many dots for too long, a timer fills. When it's full, the game ends.</span></li>
+      <li><span class="n">4</span><span>Road tiles run out. Each week you get more, plus an upgrade: bridges cross water, roundabouts ease busy junctions, motorways jump straight between two points.</span></li>
+      <li><span class="n">5</span><span>Pause any time. You can still draw while paused. Pinch to zoom.</span></li>
+    </ul>
+    <button class="btn" id="btnHelpDone">Got it</button>
+  </div>
+</div>
+
+<!-- Upgrade -->
+<div class="screen" id="sUpgrade">
+  <div class="card">
+    <h2 id="upTitle">Week 2</h2>
+    <p id="upText">You've got 15 more road tiles. Pick one upgrade.</p>
+    <div class="choices" id="choices"></div>
+  </div>
+</div>
+
+<!-- Menu -->
+<div class="screen" id="sMenu">
+  <div class="card">
+    <h2>Paused</h2>
+    <button class="btn" id="btnResume">Resume</button>
+    <button class="btn secondary" id="btnHowMenu">How to play</button>
+    <button class="btn secondary" id="btnRestart">Start a new game</button>
+    <div class="offline" id="offline2"><i></i><span></span></div>
+  </div>
+</div>
+
+<!-- Game over -->
+<div class="screen" id="sOver">
+  <div class="card">
+    <h2>Gridlock</h2>
+    <p id="overWhy"></p>
+    <div class="bigscore" id="overScore">0</div>
+    <p id="overSub">trips</p>
+    <p class="small" id="overBest"></p>
+    <button class="btn" id="btnAgain">Play again</button>
+  </div>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>
