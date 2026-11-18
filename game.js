@@ -25,25 +25,67 @@
     motor: '#34353b',
     motorLine: '#f2d27a',
     tree: '#d9d2bd',
+    mount: '#c3b49a',
+    mountDark: '#a8977b',
+    mountLight: '#d8ccb6',
   };
 
   const CAR_SPEED = 1.9;        // tiles per second
   const MOTOR_SPEED = 4.2;
   const GAP = 0.55;             // spacing between queued cars
-  const CROSS = 0.45;           // seconds a plain junction is blocked per car
-  const ROUND_CROSS = 0.1;      // same, for a roundabout
-  const INTER_PENALTY = 0.35;   // routing cost of passing a plain junction
+  const CROSS = 0.7;            // seconds a 3-way junction is blocked per car
+  const CROSS_PER_ARM = 0.15;   // extra for each road beyond 3
+  const ROUND_CROSS = 0.18;     // same, for a roundabout
+  const GATE_CROSS = 0.45;      // cars take turns at a car park gate, in or out
+  const INTER_PENALTY = 0.45;   // routing cost of passing a plain junction
   const DWELL = 0.8;
-  const PIN_LIMIT = 6;
+  const PIN_LIMIT = 5;          // waiting visitors (no car on the way) before the timer starts
   const OVER_FILL = 1 / 30;     // overflow timer fills in 30s
   const OVER_DRAIN = 1 / 12;
   const WEEK_LEN = 70;
   const CARS_PER_HOUSE = 2;
-  const MAX_BRIDGE = 6;
+  const MAX_SPAN = 6;           // longest bridge or tunnel, in tiles
   const SQRT2 = Math.SQRT2;
   const SAVE_KEY = 'byways-save-v1';
   const BEST_KEY = 'byways-best';
+  const PROGRESS_KEY = 'byways-progress';
   const SEEN_HELP_KEY = 'byways-seen-help';
+
+  // Maps are drawn in landscape (28 x 18) and turned on their side for portrait.
+  // Each has fixed terrain, so it feels like a place; houses and buildings
+  // appear in different spots every game.
+  const MAPS = [
+    {
+      id: 'millbrook', name: 'Millbrook', seed: 7193, target: 1000, demand: 1,
+      blurb: 'A quiet town split by one river.',
+      rivers: [{ axis: 'v', pos: 0.42 }], lakes: 1, hills: 0, bridges: 1, tunnels: 0,
+    },
+    {
+      id: 'twinford', name: 'Twinford', seed: 4410, target: 1000, demand: 1.1,
+      blurb: 'Two rivers cross in the middle of town. Bridges are precious.',
+      rivers: [{ axis: 'v', pos: 0.4 }, { axis: 'h', pos: 0.58 }], lakes: 0, hills: 0, bridges: 2, tunnels: 0,
+    },
+    {
+      id: 'stonehill', name: 'Stonehill', seed: 2231, target: 1100, demand: 1.15,
+      blurb: 'Hills block the way. Build around them or tunnel through.',
+      rivers: [{ axis: 'v', pos: 0.66 }], lakes: 0, hills: 6, bridges: 1, tunnels: 1,
+    },
+    {
+      id: 'cragmoor', name: 'Cragmoor', seed: 9067, target: 1200, demand: 1.25,
+      blurb: 'Rivers, lakes and hills everywhere. Every tile counts.',
+      rivers: [{ axis: 'v', pos: 0.32 }, { axis: 'v', pos: 0.7 }], lakes: 2, hills: 7, bridges: 2, tunnels: 1,
+    },
+  ];
+
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
 
   const $ = (s) => document.querySelector(s);
   const canvas = $('#c');
@@ -63,6 +105,7 @@
   const rint = (a, b) => Math.floor(rnd(a, b + 1));
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const fmt = (n) => n.toLocaleString("en-GB");
 
   // ---------------------------------------------------------------- grid helpers
   const idx = (x, y) => y * G.W + x;
@@ -73,8 +116,11 @@
   const ekey = (a, b) => (a < b ? a * 65536 + b : b * 65536 + a);
   const dkey = (a, b) => a * 65536 + b;
 
+  // water and hills can't be built on without a bridge or tunnel
+  const rough = (i) => G.water[i] || G.mount[i];
+
   function freeTile(i) {
-    return !G.water[i] && !G.road[i] && !G.occ[i];
+    return !rough(i) && !G.road[i] && !G.occ[i];
   }
 
   function kind(i) {
@@ -82,6 +128,7 @@
     if (o) return o.kind === 'dest' ? null : o.kind;
     if (G.road[i]) return 'road';
     if (G.water[i]) return 'water';
+    if (G.mount[i]) return 'mount';
     return 'land';
   }
 
@@ -92,12 +139,15 @@
   }
 
   // ---------------------------------------------------------------- new game
-  function newGame() {
+  function newGame(map) {
     const portrait = window.innerHeight >= window.innerWidth;
     const W = portrait ? 18 : 28;
     const H = portrait ? 28 : 18;
     G = blankState(W, H);
-    genRiver(portrait);
+    G.map = map;
+    G.res.bridges = map.bridges;
+    G.res.tunnels = map.tunnels;
+    genTerrain(map, portrait);
     const bw = portrait ? 10 : 15;
     const bh = portrait ? 15 : 10;
     const x0 = Math.floor((W - bw) / 2);
@@ -122,7 +172,9 @@
     const N = W * H;
     return {
       W, H, N,
+      map: MAPS[0],
       water: new Uint8Array(N),
+      mount: new Uint8Array(N),
       road: new Uint8Array(N),
       round: new Uint8Array(N),
       deco: new Uint8Array(N),
@@ -135,8 +187,11 @@
       dests: [],
       cars: [],
       fx: [],
-      res: { roads: 30, bridges: 1, rounds: 0, motors: 0 },
+      res: { roads: 30, bridges: 1, tunnels: 0, rounds: 0, motors: 0 },
       bridgesUsed: 0,
+      tunnelsUsed: 0,
+      cutOff: 0,
+      targetHit: false,
       time: 0, week: 1, weekT: 0, score: 0,
       speed: 1, paused: false, over: false,
       bounds: { x0: 0, y0: 0, x1: W - 1, y1: H - 1 },
@@ -149,35 +204,71 @@
     };
   }
 
-  function genRiver(portrait) {
-    // River crosses the short side of the map, a little off-centre.
-    const along = portrait ? G.W : G.H;
-    const across = portrait ? G.H : G.W;
-    let c = Math.floor(across * rnd(0.38, 0.46));
-    const set = (a, b) => {
-      const x = portrait ? a : b;
-      const y = portrait ? b : a;
-      if (inMap(x, y)) G.water[idx(x, y)] = 1;
-    };
-    let width = 2;
-    for (let a = 0; a < along; a++) {
-      if (a > 0 && Math.random() < 0.35) {
-        const nc = c + (Math.random() < 0.5 ? -1 : 1);
-        if (nc > across * 0.3 && nc < across * 0.55) {
-          for (let w = 0; w < width; w++) set(a, nc + w);
-          c = nc;
+  function genTerrain(map, portrait) {
+    const R = mulberry32(map.seed);
+    const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+    const CW = 28, CH = 18;
+    const T = new Uint8Array(CW * CH); // 0 land, 1 water, 2 hill
+    const at = (x, y) => (x >= 0 && y >= 0 && x < CW && y < CH ? T[y * CW + x] : -1);
+    const put = (x, y, v) => { if (x >= 0 && y >= 0 && x < CW && y < CH) T[y * CW + x] = v; };
+
+    for (const rv of map.rivers) {
+      const along = rv.axis === 'v' ? CH : CW;
+      const across = rv.axis === 'v' ? CW : CH;
+      const home = Math.floor(across * rv.pos);
+      let c = home;
+      let width = 2;
+      const set = (a, b) => (rv.axis === 'v' ? put(b, a, 1) : put(a, b, 1));
+      for (let a = 0; a < along; a++) {
+        if (a > 0 && R() < 0.35) {
+          const nc = c + (R() < 0.5 ? -1 : 1);
+          if (Math.abs(nc - home) <= 3) {
+            for (let w = 0; w < width; w++) set(a, nc + w);
+            c = nc;
+          }
         }
+        if (R() < 0.15) width = width === 2 ? 3 : 2;
+        for (let w = 0; w < width; w++) set(a, c + w);
       }
-      if (Math.random() < 0.15) width = width === 2 ? 3 : 2;
-      for (let w = 0; w < width; w++) set(a, c + w);
     }
-    // A small lake on the far side, sometimes.
-    if (Math.random() < 0.7) {
-      const la = rint(2, along - 4);
-      const lc = Math.floor(across * rnd(0.72, 0.85));
-      for (let a = la; a < la + rint(2, 3); a++) for (let b = lc; b < lc + 2; b++) set(a, b);
+    for (let k = 0; k < map.lakes; k++) {
+      for (let tries = 0; tries < 50; tries++) {
+        const x = ri(2, CW - 5), y = ri(2, CH - 4);
+        let clear = true;
+        for (let yy = y - 1; yy <= y + 2; yy++) for (let xx = x - 1; xx <= x + 3; xx++) if (at(xx, yy) !== 0) clear = false;
+        if (!clear) continue;
+        for (let yy = y; yy < y + 2; yy++) for (let xx = x; xx < x + 3; xx++) put(xx, yy, 1);
+        if (R() < 0.5) put(x + 1, y + 2, 1);
+        break;
+      }
     }
-    for (let i = 0; i < G.N; i++) if (!G.water[i] && Math.random() < 0.08) G.deco[i] = 1 + rint(0, 2);
+    for (let k = 0; k < map.hills; k++) {
+      for (let tries = 0; tries < 50; tries++) {
+        const x = ri(1, CW - 2), y = ri(1, CH - 2);
+        if (at(x, y) !== 0) continue;
+        const cells = [[x, y]];
+        put(x, y, 2);
+        const size = ri(6, 12);
+        for (let g = 0; g < 80 && cells.length < size; g++) {
+          const [cx, cy] = cells[Math.floor(R() * cells.length)];
+          const [dx, dy] = [[1, 0], [-1, 0], [0, 1], [0, -1]][Math.floor(R() * 4)];
+          const nx = cx + dx, ny = cy + dy;
+          if (at(nx, ny) !== 0 || nx < 1 || ny < 1 || nx > CW - 2 || ny > CH - 2) continue;
+          put(nx, ny, 2);
+          cells.push([nx, ny]);
+        }
+        break;
+      }
+    }
+    for (let cy = 0; cy < CH; cy++) {
+      for (let cx = 0; cx < CW; cx++) {
+        const v = T[cy * CW + cx];
+        const i = portrait ? idx(cy, cx) : idx(cx, cy);
+        if (v === 1) G.water[i] = 1;
+        else if (v === 2) G.mount[i] = 1;
+        else if (R() < 0.08) G.deco[i] = 1 + Math.floor(R() * 3);
+      }
+    }
   }
 
   // ---------------------------------------------------------------- spawning
@@ -209,7 +300,7 @@
       ].filter(([px, py, dx, dy]) => {
         if (!inB(px, py) || !freeTile(idx(px, py))) return false;
         const ox = px + dx, oy = py + dy;
-        return inB(ox, oy) && !G.water[idx(ox, oy)] && !G.occ[idx(ox, oy)];
+        return inB(ox, oy) && !rough(idx(ox, oy)) && !G.occ[idx(ox, oy)];
       });
       if (!ports.length) continue;
       let score = rnd(0, 3);
@@ -241,6 +332,7 @@
     G.occ[d.port] = { kind: 'port', d };
     G.deco[d.port] = 0;
     G.dests.push(d);
+    countCutOff();
     return d;
   }
 
@@ -261,7 +353,7 @@
       const xx = x + dx, yy = y + dy;
       if (!inB(xx, yy)) continue;
       const j = idx(xx, yy);
-      if (!G.water[j] && (!G.occ[j] || G.road[j])) exits++;
+      if (!rough(j) && (!G.occ[j] || G.road[j])) exits++;
     }
     if (!exits) return false;
     // must not box in a neighbouring unconnected house
@@ -277,7 +369,7 @@
           if (!inB(ax, ay)) continue;
           const k = idx(ax, ay);
           if (k === i) continue;
-          if (!G.water[k] && !G.occ[k]) ex++;
+          if (!rough(k) && !G.occ[k]) ex++;
         }
         if (!ex) return false;
       }
@@ -315,6 +407,7 @@
     G.deco[spot] = 0;
     G.houses.push(h);
     for (let k = 0; k < CARS_PER_HOUSE; k++) addCar(h);
+    countCutOff();
     return h;
   }
 
@@ -349,7 +442,7 @@
     const hc = new Array(G.colorsUsed).fill(0);
     for (const d of G.dests) dc[d.color]++;
     for (const h of G.houses) hc[h.color]++;
-    const w = dc.map((d, i) => (d ? Math.max(0.3, d * 3.5 - hc[i] + 1) : 0));
+    const w = dc.map((d, i) => (d ? Math.max(0.3, d * 3 - hc[i] + 1) : 0));
     let sum = w.reduce((a, b) => a + b, 0);
     let r = Math.random() * sum;
     for (let i = 0; i < w.length; i++) { r -= w[i]; if (r <= 0) return i; }
@@ -385,19 +478,20 @@
     if (e.type === 'motor' && refund) G.res.motors++;
   }
 
-  function bridgeInfo() {
+  // A bridge is a connected run of road tiles over water; a tunnel is the same
+  // through hills. Each one uses up one bridge or tunnel.
+  function spanInfo(layer) {
     const seen = new Uint8Array(G.N);
     let count = 0, maxSize = 0;
     for (let i = 0; i < G.N; i++) {
-      if (!G.water[i] || !G.road[i] || seen[i]) continue;
+      if (!layer[i] || !G.road[i] || seen[i]) continue;
       count++;
-      const comp = bridgeComponent(i, seen);
-      maxSize = Math.max(maxSize, comp.length);
+      maxSize = Math.max(maxSize, spanComponent(i, layer, seen).length);
     }
     return { count, maxSize };
   }
 
-  function bridgeComponent(start, seen = new Uint8Array(G.N)) {
+  function spanComponent(start, layer, seen = new Uint8Array(G.N)) {
     const out = [];
     const stack = [start];
     seen[start] = 1;
@@ -405,10 +499,33 @@
       const n = stack.pop();
       out.push(n);
       for (const m of G.adj[n].keys()) {
-        if (!seen[m] && G.water[m] && G.road[m]) { seen[m] = 1; stack.push(m); }
+        if (!seen[m] && layer[m] && G.road[m]) { seen[m] = 1; stack.push(m); }
       }
     }
     return out;
+  }
+
+  // Houses that can't reach any building of their colour.
+  function countCutOff() {
+    const reach = new Uint8Array(G.N);
+    for (const d of G.dests) {
+      const seen = new Uint8Array(G.N);
+      const stack = [d.port];
+      seen[d.port] = 1;
+      while (stack.length) {
+        const n = stack.pop();
+        const o = G.occ[n];
+        if (o && o.kind === 'house') { if (o.h.color === d.color) reach[n] = 1; continue; }
+        if (o && n !== d.port) continue;
+        for (const m of G.adj[n].keys()) if (!seen[m]) { seen[m] = 1; stack.push(m); }
+      }
+    }
+    let n = 0;
+    for (const h of G.houses) {
+      h.cut = !reach[h.i];
+      if (h.cut) n++;
+    }
+    G.cutOff = n;
   }
 
   function tryConnect(p, q) {
@@ -434,19 +551,26 @@
     const need = (kp === 'land' ? 1 : 0) + (kq === 'land' ? 1 : 0);
     if (need > G.res.roads) return 'roads';
 
-    const setP = kp === 'land' || kp === 'water';
-    const setQ = kq === 'land' || kq === 'water';
+    const setP = kp === 'land' || kp === 'water' || kp === 'mount';
+    const setQ = kq === 'land' || kq === 'water' || kq === 'mount';
     if (setP) G.road[p] = 1;
     if (setQ) G.road[q] = 1;
     addEdge(p, q, 'road');
+    const undo = (why) => {
+      removeEdge(p, q, false);
+      if (setP) G.road[p] = 0;
+      if (setQ) G.road[q] = 0;
+      return why;
+    };
     if (G.water[p] || G.water[q]) {
-      const info = bridgeInfo();
-      if (info.count > G.res.bridges || info.maxSize > MAX_BRIDGE) {
-        removeEdge(p, q, false);
-        if (setP) G.road[p] = 0;
-        if (setQ) G.road[q] = 0;
-        return info.count > G.res.bridges ? 'bridges' : 'long';
-      }
+      const info = spanInfo(G.water);
+      if (info.count > G.res.bridges) return undo('bridges');
+      if (info.maxSize > MAX_SPAN) return undo('long');
+    }
+    if (G.mount[p] || G.mount[q]) {
+      const info = spanInfo(G.mount);
+      if (info.count > G.res.tunnels) return undo('tunnels');
+      if (info.maxSize > MAX_SPAN) return undo('long');
     }
     if (setP) G.deco[p] = 0;
     if (setQ) G.deco[q] = 0;
@@ -458,7 +582,7 @@
   function clearRoadTile(t) {
     for (const n of [...G.adj[t].keys()]) removeEdge(t, n);
     G.road[t] = 0;
-    if (!G.water[t]) G.res.roads++;
+    if (!rough(t)) G.res.roads++;
     if (G.round[t]) { G.round[t] = 0; G.res.rounds++; }
   }
 
@@ -471,8 +595,8 @@
       return true;
     }
     if (o || !G.road[i]) return false;
-    if (G.water[i]) {
-      for (const t of bridgeComponent(i)) clearRoadTile(t);
+    if (G.water[i] || G.mount[i]) {
+      for (const t of spanComponent(i, G.water[i] ? G.water : G.mount)) clearRoadTile(t);
     } else {
       clearRoadTile(i);
     }
@@ -482,7 +606,7 @@
 
   function placeRoundabout(i) {
     if (G.res.rounds <= 0) { toast('No roundabouts left. You can win more at the end of a week.'); return false; }
-    if (!G.road[i] || G.water[i] || G.round[i] || G.occ[i]) { toast('Tap a road junction to place a roundabout.'); return false; }
+    if (!G.road[i] || rough(i) || G.round[i] || G.occ[i]) { toast('Tap a road junction to place a roundabout.'); return false; }
     G.round[i] = 1;
     G.res.rounds--;
     graphChanged();
@@ -492,7 +616,7 @@
   function placeMotorway(a, b) {
     const ka = kind(a), kb = kind(b);
     const okKind = (k) => k === 'road' || k === 'land';
-    if (!okKind(ka) || !okKind(kb) || G.water[a] || G.water[b]) {
+    if (!okKind(ka) || !okKind(kb) || rough(a) || rough(b)) {
       toast('Motorways start and end on land, not on houses or buildings.');
       return false;
     }
@@ -509,8 +633,10 @@
   }
 
   function graphChanged() {
-    G.bridgesUsed = bridgeInfo().count;
+    G.bridgesUsed = spanInfo(G.water).count;
+    G.tunnelsUsed = spanInfo(G.mount).count;
     for (const c of G.cars) validateCar(c);
+    countCutOff();
   }
 
   // ---------------------------------------------------------------- routing
@@ -631,9 +757,13 @@
     return G.road[n] && G.adj[n].size >= 3;
   }
   function passJunction(n) {
-    if (!isJunction(n)) return true;
+    const o = G.occ[n];
+    const gate = !!o && o.kind === 'port';
+    if (!gate && !isJunction(n)) return true;
     if (G.lock[n] > G.time) return false;
-    G.lock[n] = G.time + (G.round[n] ? ROUND_CROSS : CROSS);
+    G.lock[n] = G.time + (gate ? GATE_CROSS
+      : G.round[n] ? ROUND_CROSS
+      : CROSS + CROSS_PER_ARM * (G.adj[n].size - 3));
     return true;
   }
 
@@ -751,7 +881,10 @@
         if (car.t < lim) car.t = Math.min(lim, car.t + speed * dt);
         if (car.t >= car.len - 1e-4) {
           const s1 = car.s + 1;
-          if (s1 === car.path.length - 1) { arrive(car); return; }
+          if (s1 === car.path.length - 1) {
+            if (passJunction(car.path[s1])) arrive(car);
+            return;
+          }
           const a = car.path[s1], b = car.path[s1 + 1];
           if (!G.adj[a].has(b)) { validateCar(car); return; }
           if (!edgeFree(a, b)) return;
@@ -782,7 +915,7 @@
 
   // ---------------------------------------------------------------- simulation
   function pinInterval() {
-    return Math.max(3, 10 * Math.pow(0.92, G.week - 1));
+    return Math.max(0.9, 8 * Math.pow(0.84, G.week - 1)) / G.map.demand;
   }
 
   function step(dt) {
@@ -794,9 +927,16 @@
         d.pins++;
         d.pinT = pinInterval() * rnd(0.7, 1.3);
       }
-      if (d.pins > PIN_LIMIT) d.overflow += OVER_FILL * dt;
+      // Only visitors with no car on the way count towards the timer, so
+      // what fails you is cars being stuck or too few houses, not distance.
+      if (d.pins - d.assigned > PIN_LIMIT) d.overflow += OVER_FILL * dt;
       else d.overflow = Math.max(0, d.overflow - OVER_DRAIN * dt);
       if (d.overflow >= 1) { gameOver(d); return; }
+    }
+    if (!G.targetHit && !modal && G.score >= G.map.target) {
+      G.targetHit = true;
+      onTargetReached();
+      return;
     }
 
     G.nextHouse -= dt;
@@ -831,18 +971,62 @@
     if (G.saveT > 15) { G.saveT = 0; save(); }
   }
 
+  // ---------------------------------------------------------------- progress
+  function getProgress() {
+    let p = null;
+    try { p = JSON.parse(localStorage.getItem(PROGRESS_KEY) || 'null'); } catch (e) { p = null; }
+    if (!p) {
+      p = { unlocked: 1, best: {} };
+      // carry over a best score from before maps existed
+      let old = 0;
+      try { old = +(localStorage.getItem(BEST_KEY) || 0); } catch (e) { /* storage unavailable */ }
+      if (old) {
+        p.best.millbrook = old;
+        if (old >= MAPS[0].target) p.unlocked = 2;
+      }
+    }
+    return p;
+  }
+  function setProgress(p) {
+    try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(p)); } catch (e) { /* storage unavailable */ }
+  }
+
+  function onTargetReached() {
+    const i = MAPS.indexOf(G.map);
+    const next = MAPS[i + 1];
+    const p = getProgress();
+    const isNew = !!next && p.unlocked < i + 2;
+    if (next) p.unlocked = Math.max(p.unlocked, i + 2);
+    setProgress(p);
+    if (!isNew) {
+      toast(`Target reached: ${fmt(G.map.target)} trips in ${G.map.name}. Keep going for a best score.`);
+      return;
+    }
+    $('#tgTitle').textContent = `${next.name} unlocked`;
+    $('#tgText').textContent = `You made ${fmt(G.map.target)} trips in ${G.map.name}. Next up: ${next.blurb.charAt(0).toLowerCase() + next.blurb.slice(1)}`;
+    const go = $('#btnTgNext');
+    go.textContent = `Play ${next.name}`;
+    go.onclick = () => { save(); closeScreen(); startNew(next); };
+    openScreen('sTarget');
+  }
+
   function gameOver(d) {
     G.over = true;
-    const best = Math.max(G.score, +(localStorage.getItem(BEST_KEY) || 0));
-    try { localStorage.setItem(BEST_KEY, String(best)); localStorage.removeItem(SAVE_KEY); } catch (e) { /* storage unavailable */ }
+    const p = getProgress();
+    const prev = p.best[G.map.id] || 0;
+    p.best[G.map.id] = Math.max(prev, G.score);
+    setProgress(p);
+    try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* storage unavailable */ }
     G.overDest = d;
     // centre on the problem
     user.zoom = 1; user.px = 0; user.py = 0;
+    const game = G;
     setTimeout(() => {
-      $('#overWhy').textContent = `The ${COLORS[d.color].name} building waited too long for visitors.`;
-      $('#overScore').textContent = G.score;
-      $('#overSub').textContent = `trips in ${G.week} ${G.week === 1 ? 'week' : 'weeks'}`;
-      $('#overBest').textContent = !best ? '' : G.score >= best ? 'New best score.' : `Best: ${best} trips`;
+      if (G !== game) return; // a new game started in the meantime
+      $('#overWhy').textContent = `The ${COLORS[d.color].name} building in ${game.map.name} waited too long for visitors.`;
+      $('#overScore').textContent = game.score;
+      $('#overSub').textContent = `trips in ${game.week} ${game.week === 1 ? 'week' : 'weeks'}`;
+      $('#overBest').textContent = !prev ? '' : game.score > prev ? `New best for ${game.map.name}.` : `Best in ${game.map.name}: ${prev} trips`;
       openScreen('sOver');
     }, 1400);
   }
@@ -853,10 +1037,11 @@
     rounds: { label: '2 roundabouts', note: 'Busy junctions flow better', n: 2, icon: '<svg viewBox="0 0 48 48" fill="none" stroke="#5a5b63" stroke-width="6" stroke-linecap="round"><path d="M24 4v12M24 32v12M4 24h12M32 24h12"/><circle cx="24" cy="24" r="9"/></svg>' },
     motors: { label: 'Motorway', note: 'Fast straight link', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M8 40 40 8" stroke="#34353b" stroke-width="9"/><path d="M8 40 40 8" stroke="#f2d27a" stroke-width="1.6" stroke-dasharray="3 4"/></svg>' },
     roads: { label: '20 road tiles', note: 'More road to lay', n: 20, icon: '<svg viewBox="0 0 48 48" fill="none" stroke="#5a5b63" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 40V24h16V8h16"/></svg>' },
+    tunnels: { label: 'Tunnel', note: 'Go through a hill', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 40 18 12l7 10 5-6 15 24z" fill="#c3b49a"/><path d="M15 40v-6a9 9 0 0 1 18 0v6z" fill="#3a332b"/><path d="M3 41h42" stroke="#5a5b63" stroke-width="4"/></svg>' },
   };
 
   function showUpgrade() {
-    const keys = Object.keys(UPGRADES);
+    const keys = Object.keys(UPGRADES).filter((k) => k !== 'tunnels' || G.map.hills > 0);
     const a = pick(keys);
     let b = pick(keys);
     while (b === a) b = pick(keys);
@@ -882,15 +1067,16 @@
   // ---------------------------------------------------------------- save / load
   function save() {
     if (!G || G.over || G.demo) return;
-    const roads = [], water = [], rounds = [], deco = [];
+    const roads = [], water = [], mount = [], rounds = [], deco = [];
     for (let i = 0; i < G.N; i++) {
       if (G.road[i]) roads.push(i);
       if (G.water[i]) water.push(i);
+      if (G.mount[i]) mount.push(i);
       if (G.round[i]) rounds.push(i);
       if (G.deco[i]) deco.push(i, G.deco[i]);
     }
     const data = {
-      v: 1, W: G.W, H: G.H, roads, water, rounds, deco,
+      v: 2, map: G.map.id, targetHit: G.targetHit, W: G.W, H: G.H, roads, water, mount, rounds, deco,
       edges: [...G.edges.values()].map((e) => [e.a, e.b, e.type === 'motor' ? 1 : 0]),
       houses: G.houses.map((h) => [h.i, h.color]),
       dests: G.dests.map((d) => [d.x, d.y, d.port, d.color, d.pins, d.overflow, d.pinT]),
@@ -904,9 +1090,12 @@
   function load() {
     let data;
     try { data = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { data = null; }
-    if (!data || data.v !== 1) return false;
+    if (!data || (data.v !== 1 && data.v !== 2)) return false;
     G = blankState(data.W, data.H);
+    G.map = MAPS.find((m) => m.id === data.map) || MAPS[0];
+    G.targetHit = !!data.targetHit;
     for (const i of data.water) G.water[i] = 1;
+    for (const i of data.mount || []) G.mount[i] = 1;
     for (const i of data.roads) G.road[i] = 1;
     for (const i of data.rounds) G.round[i] = 1;
     for (let k = 0; k < data.deco.length; k += 2) G.deco[data.deco[k]] = data.deco[k + 1];
@@ -997,7 +1186,8 @@
   function lastFeedback(res) {
     if (res === 'roads') { toast('Out of road tiles. Erase some, or wait for next week.'); flashCount('road'); }
     else if (res === 'bridges') { toast('You need a bridge to cross water.'); flashCount('bridge'); }
-    else if (res === 'long') toast('That bridge is too long.');
+    else if (res === 'tunnels') { toast(G.map.hills ? 'You need a tunnel to go through a hill.' : 'Hills block roads.'); flashCount('tunnel'); }
+    else if (res === 'long') toast(`That's too long. Bridges and tunnels can be up to ${MAX_SPAN} tiles.`);
   }
 
   function roadMove(wx, wy, a) {
@@ -1018,7 +1208,7 @@
       const nx = stepToward(cur, c);
       const r = tryConnect(cur, nx);
       if (r !== 'ok') {
-        if (!a.warned) { lastFeedback(r); if (r === 'roads' || r === 'bridges' || r === 'long') a.warned = true; }
+        if (!a.warned) { lastFeedback(r); if (r !== 'bad' && r !== 'bounds') a.warned = true; }
         // let the stroke restart from a valid tile under the finger
         if (r === 'bad' && kind(nx) !== null) { cur = nx; continue; }
         break;
@@ -1037,8 +1227,18 @@
     a.last = c;
   }
 
+  function resetTouches() {
+    pointers.clear();
+    action = null;
+    pinch = null;
+    gestureLock = false;
+  }
+
   function onDown(e) {
     if (!G || modal) return;
+    // A primary pointer means no other finger is down, so anything still
+    // tracked is stale (iOS can swallow a finger lift near the Home bar).
+    if (e.isPrimary) resetTouches();
     try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 1 && !gestureLock) {
@@ -1111,7 +1311,7 @@
       if (G.res.motors <= 0) { toast('No motorways left. You can win more at the end of a week.'); return; }
       if (motorStart < 0) {
         const k = kind(c);
-        if ((k === 'road' || k === 'land') && !G.water[c] && inB(tx(c), ty(c))) { motorStart = c; toast('Now tap where the motorway should end.'); }
+        if ((k === 'road' || k === 'land') && !rough(c) && inB(tx(c), ty(c))) { motorStart = c; toast('Now tap where the motorway should end.'); }
         else toast('Tap an empty tile or a road to start the motorway.');
       } else if (c === motorStart) {
         motorStart = -1;
@@ -1123,8 +1323,20 @@
 
   canvas.addEventListener('pointerdown', onDown);
   canvas.addEventListener('pointermove', onMove);
-  canvas.addEventListener('pointerup', onUp);
-  canvas.addEventListener('pointercancel', onUp);
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointercancel', onUp);
+  canvas.addEventListener('lostpointercapture', (e) => {
+    if (pointers.has(e.pointerId)) onUp(new PointerEvent('pointercancel', { pointerId: e.pointerId }));
+  });
+  // Belt and braces: when the last finger leaves the glass, forget everything.
+  window.addEventListener('touchend', (e) => {
+    if (e.touches.length) return;
+    setTimeout(() => { if (pointers.size) resetTouches(); }, 60);
+  });
+  window.addEventListener('touchcancel', (e) => {
+    if (e.touches.length) return;
+    setTimeout(() => { if (pointers.size) resetTouches(); }, 60);
+  });
   canvas.addEventListener('pointerleave', () => { hoverTile = -1; });
   document.addEventListener('gesturestart', (e) => e.preventDefault());
   document.addEventListener('dblclick', (e) => e.preventDefault());
@@ -1181,7 +1393,7 @@
     for (let y = vy0; y <= vy1; y++) {
       for (let x = vx0; x <= vx1; x++) {
         const i = idx(x, y);
-        if (G.water[i] || G.road[i] || G.occ[i]) continue;
+        if (rough(i) || G.road[i] || G.occ[i]) continue;
         const cx = sx(x + 0.5), cy = sy(y + 0.5);
         if (G.deco[i]) {
           ctx.fillStyle = inB(x, y) ? PAL.tree : 'rgba(0,0,0,0.06)';
@@ -1215,6 +1427,27 @@
       }
     }
     ctx.stroke();
+
+    // hills
+    ctx.fillStyle = PAL.mount;
+    for (let y = vy0; y <= vy1; y++) {
+      for (let x = vx0; x <= vx1; x++) {
+        if (G.mount[idx(x, y)]) ctx.fillRect(sx(x) - 0.5, sy(y) - 0.5, s + 1, s + 1);
+      }
+    }
+    for (let y = vy0; y <= vy1; y++) {
+      for (let x = vx0; x <= vx1; x++) {
+        const i = idx(x, y);
+        if (!G.mount[i] || G.road[i]) continue;
+        const cx = sx(x + 0.5), base = sy(y + 0.85);
+        const h = s * (0.5 + ((x * 7 + y * 13) % 3) * 0.08);
+        const w = s * 0.42;
+        ctx.fillStyle = PAL.mountDark;
+        ctx.beginPath(); ctx.moveTo(cx - w, base); ctx.lineTo(cx, base - h); ctx.lineTo(cx + w, base); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = PAL.mountLight;
+        ctx.beginPath(); ctx.moveTo(cx - w, base); ctx.lineTo(cx, base - h); ctx.lineTo(cx - w * 0.1, base); ctx.closePath(); ctx.fill();
+      }
+    }
 
     // dim outside bounds
     ctx.fillStyle = 'rgba(36,38,44,0.42)';
@@ -1274,6 +1507,31 @@
 
     // cars on ordinary roads
     drawCars(false);
+
+    // tunnels: cover the road inside the hill, and draw a mouth at each end
+    ctx.fillStyle = 'rgba(195,180,154,0.82)';
+    for (let y = vy0; y <= vy1; y++) {
+      for (let x = vx0; x <= vx1; x++) {
+        const i = idx(x, y);
+        if (G.mount[i] && G.road[i]) ctx.fillRect(sx(x) - 0.5, sy(y) - 0.5, s + 1, s + 1);
+      }
+    }
+    ctx.fillStyle = '#3a332b';
+    for (const e of roadEdges) {
+      if (!G.mount[e.a] === !G.mount[e.b]) continue;
+      const inside = G.mount[e.a] ? e.a : e.b;
+      const outside = inside === e.a ? e.b : e.a;
+      const ix = tx(inside) + 0.5, iy = ty(inside) + 0.5, ox = tx(outside) + 0.5, oy = ty(outside) + 0.5;
+      const mx = (ix + ox) / 2, my = (iy + oy) / 2;
+      ctx.save();
+      ctx.translate(sx(mx), sy(my));
+      ctx.rotate(Math.atan2(oy - iy, ox - ix));
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 0.32, -Math.PI / 2, Math.PI / 2, true);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
 
     // destinations
     for (const d of G.dests) drawDest(d);
@@ -1403,8 +1661,8 @@
       ctx.arc(cx + (n - (home - 1) / 2) * size * 0.26, cy + size * 0.2, s * 0.055, 0, Math.PI * 2);
       ctx.fill();
     }
-    if (!G.adj[h.i].size) {
-      // unconnected: gentle pulse ring
+    if (h.cut) {
+      // can't reach its building: gentle pulse ring
       const pulse = 0.5 + 0.5 * Math.sin(G.time * 4 + h.id);
       ctx.strokeStyle = col.fill;
       ctx.globalAlpha = 0.25 + 0.35 * pulse;
@@ -1433,7 +1691,8 @@
     ctx.textBaseline = 'middle';
     ctx.fillText('P', px, py + s * 0.02);
 
-    const over = d.pins > PIN_LIMIT;
+    const waiting = Math.max(0, d.pins - d.assigned);
+    const over = waiting > PIN_LIMIT;
     const shake = over ? Math.sin(G.time * 30) * s * 0.03 : 0;
     ctx.fillStyle = 'rgba(0,0,0,0.16)';
     rr(cx - w / 2 + s * 0.08, cy - w / 2 + s * 0.12, w, w, s * 0.28);
@@ -1446,16 +1705,23 @@
     rr(cx - w / 2 + shake + s * 0.18, cy - w / 2 + s * 0.18, w - s * 0.36, w - s * 0.36, s * 0.16);
     ctx.stroke();
 
-    // pins
+    // pins: solid dots are waiting for a car, rings have a car on the way
     const n = Math.min(d.pins, 12);
     const cols = 4;
     const gap = w * 0.2;
+    ctx.lineWidth = Math.max(1, s * 0.035);
     for (let i = 0; i < n; i++) {
       const r = Math.floor(i / cols), c = i % cols;
       const px2 = cx - gap * 1.5 + c * gap + shake;
       const py2 = cy - gap * 0.9 + r * gap * 0.9;
-      ctx.fillStyle = i >= PIN_LIMIT ? '#24262c' : '#fff';
-      ctx.beginPath(); ctx.arc(px2, py2, s * 0.085, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(px2, py2, s * 0.085, 0, Math.PI * 2);
+      if (i < waiting) {
+        ctx.fillStyle = i >= PIN_LIMIT ? '#24262c' : '#fff';
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        ctx.stroke();
+      }
     }
 
     if (d.overflow > 0.001) {
@@ -1473,6 +1739,8 @@
   const el = {
     top: $('#top'), bottom: $('#bottom'), score: $('#score'), weekLabel: $('#weekLabel'), weekBar: $('#weekBar'),
     cRoads: $('#cRoads'), cRounds: $('#cRounds'), cMotors: $('#cMotors'), cBridges: $('#cBridges'),
+    cTunnels: $('#cTunnels'), tunnelTool: $('#tunnelTool'), scoreSub: $('#scoreSub'),
+    cut: $('#cutPill'), cCut: $('#cCut'), btnFit: $('#btnFit'),
     btnPause: $('#btnPause'), btnSpeed: $('#btnSpeed'), toast: $('#toast'),
   };
   const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>';
@@ -1481,11 +1749,18 @@
   let hudCache = '';
   function updateHud() {
     if (!G) return;
-    const key = [G.score, G.week, Math.floor(G.weekT), G.res.roads, G.res.rounds, G.res.motors, G.res.bridges - G.bridgesUsed, G.paused, G.speed, tool].join('|');
+    const zoomed = user.zoom > 1.02;
+    const key = [G.score, G.week, Math.floor(G.weekT), G.res.roads, G.res.rounds, G.res.motors, G.res.bridges - G.bridgesUsed,
+      G.res.tunnels - G.tunnelsUsed, G.cutOff, G.targetHit, zoomed, G.map.id, G.paused, G.speed, tool].join('|');
     el.weekBar.style.width = (G.weekT / WEEK_LEN * 100).toFixed(1) + '%';
     if (key === hudCache) return;
     hudCache = key;
     el.score.textContent = G.score;
+    el.scoreSub.textContent = G.targetHit ? 'trips' : `/ ${fmt(G.map.target)}`;
+    el.cCut.textContent = G.cutOff;
+    el.cut.classList.toggle('alert', G.cutOff > 0);
+    el.cut.setAttribute('aria-label', `${G.cutOff} ${G.cutOff === 1 ? 'house' : 'houses'} cut off`);
+    el.btnFit.hidden = !zoomed;
     el.weekLabel.textContent = `Week ${G.week}`;
     el.cRoads.textContent = G.res.roads;
     el.cRoads.classList.toggle('zero', G.res.roads === 0);
@@ -1493,7 +1768,14 @@
     el.cRounds.classList.toggle('zero', G.res.rounds === 0);
     el.cMotors.textContent = G.res.motors;
     el.cMotors.classList.toggle('zero', G.res.motors === 0);
-    el.cBridges.textContent = Math.max(0, G.res.bridges - G.bridgesUsed);
+    const bridgesLeft = Math.max(0, G.res.bridges - G.bridgesUsed);
+    const tunnelsLeft = Math.max(0, G.res.tunnels - G.tunnelsUsed);
+    el.cBridges.textContent = bridgesLeft;
+    el.cBridges.classList.toggle('zero', bridgesLeft === 0);
+    el.cTunnels.textContent = tunnelsLeft;
+    el.cTunnels.classList.toggle('zero', tunnelsLeft === 0);
+    el.tunnelTool.hidden = !G.map.hills;
+    el.bottom.querySelector('.toolbar').classList.toggle('six', !!G.map.hills);
     el.btnPause.innerHTML = G.paused ? ICON_PLAY : ICON_PAUSE;
     el.btnPause.setAttribute('aria-label', G.paused ? 'Play' : 'Pause');
     el.btnSpeed.textContent = G.speed === 1 ? '1×' : '2×';
@@ -1508,7 +1790,7 @@
     toastTimer = setTimeout(() => el.toast.classList.remove('show'), 2200);
   }
   function flashCount(which) {
-    const target = which === 'bridge' ? $('#bridgeBadge') : document.querySelector('.tool[data-tool="road"]');
+    const target = which === 'bridge' ? $('#bridgeTool') : which === 'tunnel' ? $('#tunnelTool') : document.querySelector('.tool[data-tool="road"]');
     target.classList.remove('flash');
     void target.offsetWidth;
     target.classList.add('flash');
@@ -1521,6 +1803,8 @@
   }
 
   document.querySelectorAll('.tool').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.info === 'bridge') { toast('Bridges are used automatically. Draw a road across water.'); return; }
+    if (b.dataset.info === 'tunnel') { toast('Tunnels are used automatically. Draw a road through a hill.'); return; }
     const t = b.dataset.tool;
     if (t === 'round' && G.res.rounds <= 0) { toast('No roundabouts yet. You can pick them at the end of a week.'); return; }
     if (t === 'motor' && G.res.motors <= 0) { toast('No motorways yet. You can pick them at the end of a week.'); return; }
@@ -1534,16 +1818,47 @@
   el.btnSpeed.addEventListener('click', () => { if (!G) return; G.speed = G.speed === 1 ? 2 : 1; hudCache = ''; });
   $('#btnMenu').addEventListener('click', () => { if (!G) return; save(); openScreen('sMenu'); });
   $('#btnResume').addEventListener('click', () => closeScreen());
-  $('#btnRestart').addEventListener('click', () => { closeScreen(); startNew(); });
+  $('#btnRestart').addEventListener('click', () => { closeScreen(); startNew(G.map); });
+  $('#btnMenuMaps').addEventListener('click', () => { save(); showMaps('sMenu'); });
+  el.btnFit.addEventListener('click', () => { user.zoom = 1; user.px = 0; user.py = 0; hudCache = ''; });
+  el.cut.addEventListener('click', () => {
+    toast(G.cutOff ? `${G.cutOff} ${G.cutOff === 1 ? 'house has' : 'houses have'} no road to a building of the same colour. Look for pulsing rings.` : 'Every house can reach its building.');
+  });
+  $('#btnTgStay').addEventListener('click', () => closeScreen());
+  $('#btnMapsBack').addEventListener('click', () => openScreen(mapsReturn || 'sTitle'));
+  $('#btnOverMaps').addEventListener('click', () => showMaps('sOver'));
   $('#btnHowMenu').addEventListener('click', () => openScreen('sHelp', 'sMenu'));
   $('#btnHowTitle').addEventListener('click', () => openScreen('sHelp', 'sTitle'));
   $('#btnHelpDone').addEventListener('click', () => {
     try { localStorage.setItem(SEEN_HELP_KEY, '1'); } catch (e) { /* storage unavailable */ }
     if (helpReturn) openScreen(helpReturn); else closeScreen();
   });
-  $('#btnNew').addEventListener('click', () => { closeScreen(); startNew(); });
-  $('#btnContinue').addEventListener('click', () => { if (load()) { closeScreen(); showHud(true); } else startNew(); });
-  $('#btnAgain').addEventListener('click', () => { closeScreen(); startNew(); });
+  $('#btnNew').addEventListener('click', () => showMaps('sTitle'));
+  $('#btnContinue').addEventListener('click', () => { if (load()) { closeScreen(); showHud(true); } else showMaps('sTitle'); });
+  $('#btnAgain').addEventListener('click', () => { closeScreen(); startNew(G.map); });
+
+  let mapsReturn = null;
+  function showMaps(returnTo) {
+    mapsReturn = returnTo;
+    const p = getProgress();
+    const list = $('#mapList');
+    list.innerHTML = '';
+    MAPS.forEach((m, i) => {
+      const locked = i >= p.unlocked;
+      const best = p.best[m.id] || 0;
+      const btn = document.createElement('button');
+      btn.className = 'mapcard';
+      btn.disabled = locked;
+      const status = locked
+        ? `Make ${fmt(MAPS[i - 1].target)} trips in ${MAPS[i - 1].name} to unlock`
+        : `Target ${fmt(m.target)} trips${best ? ` · Best ${fmt(best)}` : ''}`;
+      btn.innerHTML = `<span class="mapnum">${locked ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>' : i + 1}</span>`
+        + `<span class="maptext"><b>${m.name}</b><small>${m.blurb}</small><em>${status}</em></span>`;
+      if (!locked) btn.addEventListener('click', () => { closeScreen(); startNew(m); });
+      list.appendChild(btn);
+    });
+    openScreen('sMaps');
+  }
 
   let helpReturn = null;
   function openScreen(id, returnTo) {
@@ -1565,10 +1880,10 @@
     camSnap = true;
   }
 
-  function startNew() {
+  function startNew(map) {
     try { localStorage.removeItem(SAVE_KEY); } catch (e) { /* storage unavailable */ }
     showHud(true);
-    newGame();
+    newGame(map || MAPS[0]);
     save();
     let seen = false;
     try { seen = !!localStorage.getItem(SEEN_HELP_KEY); } catch (e) { /* storage unavailable */ }
@@ -1580,9 +1895,10 @@
     try { hasSave = !!localStorage.getItem(SAVE_KEY); } catch (e) { /* storage unavailable */ }
     $('#btnContinue').hidden = !hasSave;
     $('#btnNew').className = hasSave ? 'btn secondary' : 'btn';
-    let best = 0;
-    try { best = +(localStorage.getItem(BEST_KEY) || 0); } catch (e) { /* storage unavailable */ }
-    $('#bestLine').textContent = best ? `Best: ${best} trips` : '';
+    $('#btnNew').textContent = hasSave ? 'New game' : 'Play';
+    const p = getProgress();
+    setProgress(p);
+    $('#bestLine').textContent = `${Math.min(p.unlocked, MAPS.length)} of ${MAPS.length} maps unlocked`;
     openScreen('sTitle');
   }
 
@@ -1675,11 +1991,11 @@
 
   measure();
   // Show a live map behind the title screen.
-  newGame();
+  newGame(MAPS[0]);
   G.demo = true;
   showTitle();
   requestAnimationFrame(frame);
 
   // exposed for testing in the browser console
-  window.__byways = { get G() { return G; }, cam, step, tryConnect, idx, findPath, save, load, sx, sy };
+  window.__byways = { get G() { return G; }, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress };
 })();
