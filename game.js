@@ -2423,6 +2423,202 @@
   });
   window.addEventListener('pagehide', () => save());
 
+  // ---------------------------------------------------------------- sound
+  // Lo-fi music made live in the browser, so there are no audio files to
+  // download and it works offline: a slow four-chord loop, a soft beat and
+  // vinyl crackle. When a building fills up, a low pulse fades in from its
+  // side of the screen and speeds up as its timer runs down.
+  const SOUND_KEY = 'byways-sound';
+  let soundOn = true;
+  try { soundOn = localStorage.getItem(SOUND_KEY) !== '0'; } catch (e) { /* storage unavailable */ }
+  const BEAT = 60 / 72;
+  // Fmaj7, Em7, Dm7, Cmaj7 as MIDI note numbers
+  const CHORDS = [[53, 57, 60, 64], [52, 55, 59, 62], [50, 53, 57, 60], [48, 52, 55, 59]];
+  const hz = (m) => 440 * 2 ** ((m - 69) / 12);
+  const snd = { ctx: null, master: null, music: null, melody: null, tone: null, noise: null, next: 0, step: 0, pulseAt: 0 };
+
+  function audioStart() {
+    if (!soundOn) return;
+    if (!snd.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      // "ambient" respects the silent switch and plays alongside your own music or podcasts
+      try { if (navigator.audioSession) navigator.audioSession.type = 'ambient'; } catch (e) { /* not supported */ }
+      const ctx = new AC();
+      snd.ctx = ctx;
+      snd.master = ctx.createGain();
+      snd.master.gain.value = 0;
+      snd.master.connect(ctx.destination);
+      // the music runs through a warm low-pass filter, which opens up a little when things get tense
+      snd.tone = ctx.createBiquadFilter();
+      snd.tone.type = 'lowpass';
+      snd.tone.frequency.value = 1300;
+      snd.tone.Q.value = 0.4;
+      snd.tone.connect(snd.master);
+      snd.music = ctx.createGain();
+      snd.music.connect(snd.tone);
+      // melody notes also go into a soft echo
+      const echo = ctx.createDelay(1);
+      echo.delayTime.value = BEAT * 0.75;
+      const feedback = ctx.createGain();
+      feedback.gain.value = 0.35;
+      const wet = ctx.createGain();
+      wet.gain.value = 0.45;
+      echo.connect(feedback); feedback.connect(echo); echo.connect(wet); wet.connect(snd.tone);
+      snd.melody = ctx.createGain();
+      snd.melody.connect(snd.music); snd.melody.connect(echo);
+      // white noise for the brushes and hi-hat
+      snd.noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+      const nd = snd.noise.getChannelData(0);
+      for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+      // vinyl crackle: faint hiss with the odd pop, on a loop
+      const vinyl = ctx.createBuffer(1, ctx.sampleRate * 3, ctx.sampleRate);
+      const vd = vinyl.getChannelData(0);
+      for (let i = 0; i < vd.length; i++) vd[i] = (Math.random() * 2 - 1) * (Math.random() < 0.0006 ? 0.8 : 0.012);
+      const crackle = ctx.createBufferSource();
+      crackle.buffer = vinyl;
+      crackle.loop = true;
+      const band = ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.value = 2500;
+      band.Q.value = 0.7;
+      const cg = ctx.createGain();
+      cg.gain.value = 0.2;
+      crackle.connect(band); band.connect(cg); cg.connect(snd.master);
+      crackle.start();
+      snd.next = ctx.currentTime + 0.1;
+    }
+    if (snd.ctx.state !== 'running') snd.ctx.resume().catch(() => {});
+  }
+
+  function voice(type, freq, t, len, peak, attack, out, detune = 0) {
+    const o = snd.ctx.createOscillator();
+    o.type = type;
+    o.frequency.value = freq;
+    o.detune.value = detune;
+    const g = snd.ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(peak, t + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+    o.connect(g); g.connect(out || snd.music);
+    o.start(t);
+    o.stop(t + len + 0.05);
+  }
+
+  function noiseHit(t, type, freq, peak, len, out) {
+    const src = snd.ctx.createBufferSource();
+    src.buffer = snd.noise;
+    const f = snd.ctx.createBiquadFilter();
+    f.type = type;
+    f.frequency.value = freq;
+    const g = snd.ctx.createGain();
+    g.gain.setValueAtTime(peak, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+    src.connect(f); f.connect(g); g.connect(out || snd.music);
+    src.start(t, Math.random() * 1.5);
+    src.stop(t + len + 0.05);
+  }
+
+  function kick(t, peak, out) {
+    const o = snd.ctx.createOscillator();
+    o.frequency.setValueAtTime(110, t);
+    o.frequency.exponentialRampToValueAtTime(45, t + 0.18);
+    const g = snd.ctx.createGain();
+    g.gain.setValueAtTime(peak, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+    o.connect(g); g.connect(out || snd.music);
+    o.start(t);
+    o.stop(t + 0.45);
+  }
+
+  // One half-beat of music. Off-beats are pushed slightly late for a lazy swing.
+  function playStep(t, step) {
+    const off = step % 2 === 1;
+    const beat = (step >> 1) % 4;
+    const chord = CHORDS[(step >> 3) % 4];
+    const tt = off ? t + BEAT * 0.08 : t;
+    if (!off && beat === 0) {
+      for (const n of chord) {
+        voice('triangle', hz(n), t, BEAT * 4.3, 0.028, 1.1, null, -6);
+        voice('triangle', hz(n), t, BEAT * 4.3, 0.028, 1.1, null, 6);
+      }
+    }
+    if (!off && (beat === 0 || beat === 2)) {
+      kick(t, 0.2);
+      voice('sine', hz(chord[0] - 12 + (beat === 2 ? 7 : 0)), t, BEAT * 1.7, 0.13, 0.03);
+    }
+    if (!off && (beat === 1 || beat === 3)) noiseHit(t, 'bandpass', 1800, 0.05, 0.2);
+    if (off) noiseHit(tt, 'highpass', 6500, 0.006, 0.05, snd.master);
+    if (Math.random() < 0.2) {
+      const n = chord[(Math.random() * 4) | 0] + (Math.random() < 0.5 ? 12 : 24);
+      voice('sine', hz(n), tt, BEAT * 1.6, 0.04, 0.02, snd.melody);
+    }
+  }
+
+  // A soft low thump and a chime, panned towards the building that's filling up.
+  function pulse(t, u, pan) {
+    let out = snd.master;
+    if (snd.ctx.createStereoPanner) {
+      const p = snd.ctx.createStereoPanner();
+      p.pan.value = pan;
+      p.connect(snd.master);
+      out = p;
+    }
+    kick(t, 0.05 + 0.3 * u, out);
+    const chord = CHORDS[(snd.step >> 3) % 4];
+    voice('sine', hz(chord[0] + 24), t, 0.7, 0.025 + 0.05 * u, 0.01, out);
+  }
+
+  function audioTick() {
+    const ctx = snd.ctx;
+    if (!ctx || ctx.state !== 'running') return;
+    const now = ctx.currentTime;
+    const live = G && !G.over && !modal && !G.paused;
+    snd.master.gain.setTargetAtTime(!soundOn ? 0 : live ? 0.55 : 0.22, now, 0.4);
+    if (snd.next < now) snd.next = now + 0.05;
+    while (snd.next < now + 0.25) {
+      playStep(snd.next, snd.step);
+      snd.step = (snd.step + 1) % 32;
+      snd.next += BEAT / 2;
+    }
+    // How urgent is the fullest building? Starts once 3 visitors are waiting,
+    // then climbs with the timer once it's past the limit.
+    let u = 0, pan = 0;
+    if (live) {
+      for (const d of G.dests) {
+        const w = d.pins - d.assigned;
+        const v = w > PIN_LIMIT ? 0.4 + 0.6 * d.overflow : w > 2 ? (0.3 * (w - 2)) / (PIN_LIMIT - 2) : 0;
+        if (v > u) { u = v; pan = clamp((sx(d.x + 1) / view.w) * 2 - 1, -1, 1) * 0.6; }
+      }
+    }
+    if (u > 0.01 && now >= snd.pulseAt) {
+      pulse(now + 0.02, u, pan);
+      snd.pulseAt = now + 1.4 - 0.95 * u;
+    }
+    snd.tone.frequency.setTargetAtTime(1300 + 1500 * u, now, 0.5);
+  }
+
+  for (const type of ['pointerdown', 'touchend', 'click', 'keydown']) {
+    document.addEventListener(type, audioStart, { capture: true, passive: true });
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!snd.ctx) return;
+    if (document.hidden) snd.ctx.suspend().catch(() => {});
+    else if (soundOn) snd.ctx.resume().catch(() => {});
+  });
+  $('#btnSound').addEventListener('click', () => {
+    soundOn = !soundOn;
+    try { localStorage.setItem(SOUND_KEY, soundOn ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+    soundLabel();
+    if (soundOn) audioStart();
+    else if (snd.ctx) {
+      snd.master.gain.setTargetAtTime(0, snd.ctx.currentTime, 0.1);
+      setTimeout(() => { if (!soundOn) snd.ctx.suspend().catch(() => {}); }, 600);
+    }
+  });
+  function soundLabel() { $('#btnSound').textContent = `Sound: ${soundOn ? 'on' : 'off'}`; }
+  soundLabel();
+
   let last = performance.now();
   let acc = 0;
   function frame(now) {
@@ -2443,6 +2639,7 @@
     updateCamera(dt);
     render();
     updateHud();
+    audioTick();
     requestAnimationFrame(frame);
   }
 
@@ -2454,5 +2651,5 @@
   requestAnimationFrame(frame);
 
   // exposed for testing in the browser console
-  window.__byways = { get G() { return G; }, landAreas, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress, addEntrance, bulldoze, moveHouse, canGo, nodeFor, deck, showUpgrade, dispatch };
+  window.__byways = { get G() { return G; }, snd, audioStart, audioTick, landAreas, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress, addEntrance, bulldoze, moveHouse, canGo, nodeFor, deck, showUpgrade, dispatch };
 })();
