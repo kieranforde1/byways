@@ -53,6 +53,9 @@
   const BEST_KEY = 'byways-best';
   const PROGRESS_KEY = 'byways-progress';
   const SEEN_HELP_KEY = 'byways-seen-help';
+  const SHAPES_KEY = 'byways-shapes';
+  let shapesOn = false;
+  try { shapesOn = localStorage.getItem(SHAPES_KEY) === '1'; } catch (e) { /* storage unavailable */ }
 
   // Maps are drawn in landscape (28 x 18) and turned on their side for portrait.
   // Each has fixed terrain, so it feels like a place; houses and buildings
@@ -148,6 +151,8 @@
 
   // ---------------------------------------------------------------- new game
   function newGame(map) {
+    undoStack = [];
+    pendingSnap = null;
     const portrait = window.innerHeight >= window.innerWidth;
     const W = portrait ? 18 : 28;
     const H = portrait ? 28 : 18;
@@ -198,7 +203,7 @@
       fx: [],
       res: {
         roads: 30, bridges: 1, tunnels: 0, rounds: 0, motors: 0,
-        oneways: 0, overpasses: 0, entrances: 0, carparks: 0, buses: 0, dozers: 0, moves: 0,
+        entrances: 0, dozers: 0, moves: 0,
       },
       owned: {}, // upgrade tools picked up this game, so they stay in the toolbar
       bridgesUsed: 0,
@@ -291,8 +296,40 @@
     return Math.max(Math.abs(px - cx), Math.abs(py - cy));
   }
 
+  // Splits the open land into areas you can build roads across without a new
+  // bridge or tunnel. An area is "settled" if it already touches your town.
+  function landAreas() {
+    const area = new Int32Array(G.N).fill(-1);
+    const settled = [];
+    const open = (i) => (!rough(i) || G.road[i]) && !G.occ[i];
+    let any = false;
+    for (let s = 0; s < G.N; s++) {
+      if (area[s] >= 0 || !inB(tx(s), ty(s)) || !open(s)) continue;
+      const id = settled.length;
+      let town = false;
+      const stack = [s];
+      area[s] = id;
+      while (stack.length) {
+        const u = stack.pop();
+        if (G.road[u]) town = true;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const x = tx(u) + dx, y = ty(u) + dy;
+          if (!inB(x, y)) continue;
+          const v = idx(x, y);
+          if (G.occ[v]) { if (G.occ[v].kind !== 'dest' && G.adj[v].size) town = true; continue; }
+          if (area[v] < 0 && open(v)) { area[v] = id; stack.push(v); }
+        }
+      }
+      settled.push(town);
+      if (town) any = true;
+    }
+    // Before anything is built, everywhere counts.
+    return { area, ok: (i) => !any || (area[i] >= 0 && settled[area[i]]) };
+  }
+
   function spawnDest(color) {
     const B = G.bounds;
+    const land = landAreas();
     let best = null;
     let bestScore = -Infinity;
     for (let tries = 0; tries < 500; tries++) {
@@ -313,7 +350,7 @@
       ].filter(([px, py, dx, dy]) => {
         if (!inB(px, py) || !freeTile(idx(px, py))) return false;
         const ox = px + dx, oy = py + dy;
-        return inB(ox, oy) && !rough(idx(ox, oy)) && !G.occ[idx(ox, oy)];
+        return inB(ox, oy) && !rough(idx(ox, oy)) && !G.occ[idx(ox, oy)] && land.ok(idx(ox, oy));
       });
       if (!ports.length) continue;
       let score = rnd(0, 3);
@@ -393,6 +430,13 @@
   function spawnHouse(color, near) {
     const B = G.bounds;
     const mine = G.houses.filter((h) => h.color === color);
+    // Houses only appear across water or hills when you have a bridge or tunnel to reach them.
+    const spare = G.res.bridges - G.bridgesUsed + G.res.tunnels - G.tunnelsUsed;
+    const land = spare > 0 ? null : landAreas();
+    const reachable = (i) => !land || [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
+      const x = tx(i) + dx, y = ty(i) + dy;
+      return inB(x, y) && land.ok(idx(x, y));
+    });
     let spot = -1;
     for (let tries = 0; tries < 400 && spot < 0; tries++) {
       let x, y;
@@ -411,7 +455,7 @@
       }
       if (!inMap(x, y)) continue;
       const i = idx(x, y);
-      if (houseSpotOK(i)) spot = i;
+      if (houseSpotOK(i) && reachable(i)) spot = i;
     }
     if (spot < 0 && near) return spawnHouse(color, null);
     if (spot < 0) return null;
@@ -490,7 +534,6 @@
     G.adj[b].delete(a);
     G.edges.delete(ekey(a, b));
     if (e.type === 'motor' && refund) G.res.motors++;
-    if (e.from !== undefined && refund) G.res.oneways++;
   }
 
   // Can a car drive from a to b? Roads are two-way unless made one-way.
@@ -558,7 +601,8 @@
     };
     for (const d of G.dests) {
       const there = new Set(walk(d, false));
-      for (const n of walk(d, true)) if (there.has(n)) reach[n] = 1;
+      d.cut = true;
+      for (const n of walk(d, true)) if (there.has(n)) { reach[n] = 1; d.cut = false; }
     }
     let n = 0;
     for (const h of G.houses) {
@@ -627,7 +671,7 @@
     G.road[t] = 0;
     if (!rough(t)) G.res.roads++;
     if (G.round[t]) { G.round[t] = 0; G.res.rounds++; }
-    if (G.overpass[t]) { G.overpass[t] = 0; G.res.overpasses++; }
+    G.overpass[t] = 0;
   }
 
   function eraseAt(i) {
@@ -679,87 +723,47 @@
   // ---------------------------------------------------------------- upgrades you place
   const ORTHO = [[0, -1], [0, 1], [-1, 0], [1, 0]];
 
-  function placeOverpass(i) {
-    if (!G.road[i] || rough(i) || G.round[i] || G.overpass[i] || G.occ[i]) { toast('Tap a crossroads, where four roads meet.'); return false; }
-    const x = tx(i), y = ty(i);
-    const arms = ORTHO.map(([dx, dy]) => (inMap(x + dx, y + dy) ? idx(x + dx, y + dy) : -1));
-    const ok = arms.every((n) => n >= 0 && G.adj[i].has(n) && G.adj[i].get(n).type === 'road') && G.adj[i].size === 4;
-    if (!ok) { toast('Overpasses go on a crossroads with four straight roads meeting.'); return false; }
-    G.overpass[i] = 1;
-    for (const n of [arms[2], arms[3]]) {
-      const e = G.adj[i].get(n);
-      const from = e.from;
-      removeEdge(i, n, false);
-      const ne = addEdge(deck(i), n, 'road');
-      if (from !== undefined) ne.from = from === i ? deck(i) : n;
-    }
-    G.res.overpasses--;
-    graphChanged();
-    return true;
-  }
-
-  // Make the road from a to b one-way in that direction. Doing it again the
-  // other way flips it for free.
-  function setOneWay(a, b) {
-    const e = G.adj[a].get(b);
-    if (!e || e.type !== 'road' || G.occ[a] || G.occ[b]) return 'bad';
-    if (e.from === a) return 'same';
-    if (e.from === undefined) {
-      if (G.res.oneways <= 0) return 'none';
-      G.res.oneways--;
-    }
-    e.from = a;
-    graphChanged();
-    return 'ok';
-  }
-
-  function addEntrance(t) {
-    if (!inB(tx(t), ty(t)) || !freeTile(t)) { toast('Tap an empty tile right next to a building.'); return false; }
-    let d = null;
-    for (const [dx, dy] of ORTHO) {
-      const x = tx(t) + dx, y = ty(t) + dy;
-      if (!inMap(x, y)) continue;
-      const o = G.occ[idx(x, y)];
-      if (o && o.kind === 'dest') d = o.d;
-    }
-    if (!d) { toast('Tap an empty tile right next to a building.'); return false; }
-    if (d.ports.length >= 3) { toast('That building already has three entrances.'); return false; }
-    G.occ[t] = { kind: 'port', d };
-    G.deco[t] = 0;
-    d.ports.push(t);
-    G.res.entrances--;
-    graphChanged();
-    return true;
-  }
-
   function destAt(i) {
     const o = G.occ[i];
     return o && (o.kind === 'dest' || o.kind === 'port') ? o.d : null;
   }
 
-  function enlargeCarPark(i) {
-    const d = destAt(i);
-    if (!d) { toast('Tap a building to give it a bigger car park.'); return false; }
-    if (d.bigPark) { toast('That building already has a big car park.'); return false; }
-    d.bigPark = true;
-    G.res.carparks--;
-    return true;
-  }
-
-  function makeBus(i) {
-    const o = G.occ[i];
-    if (!o || o.kind !== 'house') { toast('Tap a house to swap its cars for a shuttle bus.'); return false; }
-    const h = o.h;
-    if (h.bus) { toast('That house already has a bus.'); return false; }
-    h.bus = true;
-    for (const c of G.cars) {
-      if (c.house !== h) continue;
-      if (c.state === 'home') c.state = 'gone';
-      else c.retire = true;
+  // Tap a building (or the tile beside it) and a new car park appears on the
+  // free side furthest from its existing ones.
+  function addEntrance(t) {
+    let d = destAt(t);
+    if (!d) {
+      for (const [dx, dy] of ORTHO) {
+        const x = tx(t) + dx, y = ty(t) + dy;
+        if (inMap(x, y) && G.occ[idx(x, y)] && G.occ[idx(x, y)].kind === 'dest') d = G.occ[idx(x, y)].d;
+      }
     }
-    G.cars = G.cars.filter((c) => c.state !== 'gone');
-    addCar(h, true);
-    G.res.buses--;
+    if (!d) { toast('Tap a building to give it another car park.'); return false; }
+    if (d.ports.length >= 3) { toast('That building already has three car parks.'); return false; }
+    const { x, y } = d;
+    const sides = [
+      [x, y - 1, 0, -1], [x + 1, y - 1, 0, -1], [x, y + 2, 0, 1], [x + 1, y + 2, 0, 1],
+      [x - 1, y, -1, 0], [x - 1, y + 1, -1, 0], [x + 2, y, 1, 0], [x + 2, y + 1, 1, 0],
+    ];
+    let best = -1, bestScore = -Infinity;
+    for (const [px, py, dx, dy] of sides) {
+      if (!inB(px, py)) continue;
+      const p = idx(px, py);
+      if (!freeTile(p)) continue;
+      const ox = px + dx, oy = py + dy;
+      const open = inB(ox, oy) && !rough(idx(ox, oy)) && !(G.occ[idx(ox, oy)] && G.occ[idx(ox, oy)].kind !== 'port');
+      let score = open ? 10 : 0;
+      for (const q of d.ports) score += Math.abs(tx(q) - px) + Math.abs(ty(q) - py);
+      if (score > bestScore) { bestScore = score; best = p; }
+    }
+    if (best < 0) { toast('There is no free space around that building.'); return false; }
+    G.occ[best] = { kind: 'port', d };
+    G.deco[best] = 0;
+    d.ports.push(best);
+    G.res.entrances--;
+    G.fx.push({ type: 'poof', x: tx(best) + 0.5, y: ty(best) + 0.5, t: 0 });
+    graphChanged();
+    toast('New car park added. Connect a road to it.');
     return true;
   }
 
@@ -785,7 +789,59 @@
     return true;
   }
 
+  // ---------------------------------------------------------------- undo
+  // Covers changes to the road network. Each undo puts the roads back and
+  // returns what the change cost, but keeps anything you've earned since.
+  const UNDO_TOOLS = new Set(['road', 'erase', 'round', 'motor']);
+  const NET_RES = ['roads', 'rounds', 'motors'];
+  let undoStack = [];
+  let pendingSnap = null;
+
+  function snapNet() {
+    return {
+      ver: G.gver,
+      road: G.road.slice(), round: G.round.slice(), overpass: G.overpass.slice(),
+      edges: [...G.edges.values()].map((e) => [e.a, e.b, e.type, e.from]),
+      res: { ...G.res },
+    };
+  }
+
+  function commitUndo() {
+    if (!pendingSnap) return;
+    const s = pendingSnap;
+    pendingSnap = null;
+    if (G.gver === s.ver) return;
+    undoStack.push({ s, after: { ...G.res } });
+    if (undoStack.length > 30) undoStack.shift();
+    hudCache = '';
+  }
+
+  function undo() {
+    commitUndo();
+    const u = undoStack.pop();
+    if (!u) return;
+    const { s, after } = u;
+    for (const e of [...G.edges.values()]) removeEdge(e.a, e.b, false);
+    for (let i = 0; i < G.N; i++) {
+      G.road[i] = G.occ[i] ? 0 : s.road[i]; // something may have been built there since
+      G.round[i] = G.road[i] ? s.round[i] : 0;
+      G.overpass[i] = G.road[i] ? s.overpass[i] : 0;
+    }
+    for (const [a, b, type, from] of s.edges) {
+      if (!nodeValid(a) || !nodeValid(b)) continue;
+      const houseFull = (n) => G.occ[n] && G.occ[n].kind === 'house' && G.adj[n].size > 0;
+      if (houseFull(a) || houseFull(b)) continue;
+      const e = addEdge(a, b, type);
+      if (from !== undefined) e.from = from;
+    }
+    for (const k of NET_RES) G.res[k] = Math.max(0, G.res[k] + s.res[k] - after[k]);
+    graphChanged();
+    hudCache = '';
+    toast('Undone.');
+  }
+
   function graphChanged() {
+    G.gver = (G.gver || 0) + 1;
     G.bridgesUsed = spanInfo(G.water).count;
     G.tunnelsUsed = spanInfo(G.mount).count;
     for (const c of G.cars) validateCar(c);
@@ -1098,6 +1154,24 @@
     return null;
   }
 
+  // A road counts as jammed while cars on it are crawling or stopped.
+  // The level eases up and down so the red tint doesn't flicker.
+  function updateJams(dt) {
+    const stuck = new Map();
+    for (const c of G.cars) {
+      if (c.state !== 'drive' || c.dk !== c.prevDk) continue;
+      const free = (c.motor ? MOTOR_SPEED : CAR_SPEED) * (c.bus ? BUS_SPEED : 1) * dt;
+      if (c.t - c.prevT >= free * 0.4) continue;
+      const e = G.adj[c.path[c.s]].get(c.path[c.s + 1]);
+      if (e) stuck.set(e, (stuck.get(e) || 0) + 1);
+    }
+    const k = Math.min(1, dt * 1.5);
+    for (const e of G.edges.values()) {
+      const target = Math.min(1, (stuck.get(e) || 0) / 2);
+      e.jam = (e.jam || 0) + (target - (e.jam || 0)) * k;
+    }
+  }
+
   // ---------------------------------------------------------------- simulation
   function pinInterval() {
     return Math.max(0.9, 8 * Math.pow(0.84, G.week - 1)) / G.map.demand;
@@ -1138,7 +1212,12 @@
     G.dispatchT -= dt;
     if (G.dispatchT <= 0) { dispatch(); G.dispatchT = 0.25; }
 
-    for (const c of G.cars) updateCar(c, dt);
+    for (const c of G.cars) {
+      c.prevT = c.t;
+      c.prevDk = c.dk;
+      updateCar(c, dt);
+    }
+    updateJams(dt);
     if (G.cars.some((c) => c.state === 'gone')) G.cars = G.cars.filter((c) => c.state !== 'gone');
 
     for (const f of G.fx) f.t += dt;
@@ -1224,29 +1303,27 @@
     motors: { label: 'Motorway', note: 'Fast straight link', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M8 40 40 8" stroke="#34353b" stroke-width="9"/><path d="M8 40 40 8" stroke="#f2d27a" stroke-width="1.6" stroke-dasharray="3 4"/></svg>' },
     roads: { label: '20 road tiles', note: 'More road to lay', n: 20, icon: '<svg viewBox="0 0 48 48" fill="none" stroke="#5a5b63" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 40V24h16V8h16"/></svg>' },
     tunnels: { label: 'Tunnel', note: 'Go through a hill', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 40 18 12l7 10 5-6 15 24z" fill="#c3b49a"/><path d="M15 40v-6a9 9 0 0 1 18 0v6z" fill="#3a332b"/><path d="M3 41h42" stroke="#5a5b63" stroke-width="4"/></svg>' },
-    oneways: { label: 'One-way streets', note: 'Two lanes going one way, for 6 stretches of road', n: 6, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M4 24h40" stroke="#5a5b63" stroke-width="14"/><path d="M12 18l6 6-6 6M24 18l6 6-6 6" stroke="#fff" stroke-width="3"/></svg>' },
-    overpasses: { label: 'Overpass', note: 'Lift one road over another at a crossroads', n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M24 4v40" stroke="#5a5b63" stroke-width="9"/><path d="M4 24h40" stroke="#2c2d33" stroke-width="13"/><path d="M4 24h40" stroke="#7a7b84" stroke-width="9"/></svg>' },
-    entrances: { label: 'Second entrance', note: 'Another way into a building', n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linejoin="round"><rect x="14" y="10" width="20" height="20" rx="4" fill="#e4572e"/><rect x="6" y="32" width="10" height="10" rx="2" fill="#9e3518"/><rect x="32" y="32" width="10" height="10" rx="2" fill="#9e3518"/></svg>' },
-    carparks: { label: 'Bigger car park', note: 'Cars get in and out of one building twice as fast', n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none"><rect x="6" y="6" width="36" height="36" rx="8" fill="#9e3518"/><path d="M19 34V14h7a6 6 0 0 1 0 12h-7" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>' },
-    buses: { label: 'Shuttle bus', note: `Swap one house's cars for a bus that carries ${BUS_CAP} visitors`, n: 1, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none"><rect x="4" y="14" width="40" height="18" rx="6" fill="#2a9d8f"/><path d="M10 19h6M20 19h6M30 19h6" stroke="#fff" stroke-width="4" stroke-linecap="round"/><circle cx="13" cy="34" r="4" fill="#24262c"/><circle cx="35" cy="34" r="4" fill="#24262c"/></svg>' },
-    dozers: { label: 'Bulldozer', note: 'Turn 3 hill or water tiles into land', n: 3, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M6 38 18 16l8 12 4-5 12 15z" fill="#c3b49a"/><rect x="18" y="26" width="18" height="10" rx="2" fill="#e9a93a"/><path d="M14 22v16" stroke="#5a5b63" stroke-width="4"/><circle cx="22" cy="40" r="3" fill="#24262c"/><circle cx="32" cy="40" r="3" fill="#24262c"/></svg>' },
-    moves: { label: 'Move a house', note: 'Pick up 2 houses and put them somewhere better', n: 2, rare: true, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="24" width="14" height="14" rx="3" fill="#e4572e" opacity=".35"/><rect x="30" y="10" width="14" height="14" rx="3" fill="#e4572e"/><path d="M14 22c2-8 8-12 14-12M24 6l4 4-4 4" stroke="#5a5b63" stroke-width="3"/></svg>' },
+    entrances: { label: 'Extra car park', note: 'A second way in for a busy building', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linejoin="round"><rect x="14" y="10" width="20" height="20" rx="4" fill="#e4572e"/><rect x="6" y="32" width="10" height="10" rx="2" fill="#9e3518"/><rect x="32" y="32" width="10" height="10" rx="2" fill="#9e3518"/></svg>' },
+    dozers: { label: 'Bulldozer', note: 'Clear 3 hill or water tiles', n: 3, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M6 38 18 16l8 12 4-5 12 15z" fill="#c3b49a"/><rect x="18" y="26" width="18" height="10" rx="2" fill="#e9a93a"/><path d="M14 22v16" stroke="#5a5b63" stroke-width="4"/><circle cx="22" cy="40" r="3" fill="#24262c"/><circle cx="32" cy="40" r="3" fill="#24262c"/></svg>' },
+    moves: { label: 'Move a house', note: 'Move 2 houses somewhere better', n: 2, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="24" width="14" height="14" rx="3" fill="#e4572e" opacity=".35"/><rect x="30" y="10" width="14" height="14" rx="3" fill="#e4572e"/><path d="M14 22c2-8 8-12 14-12M24 6l4 4-4 4" stroke="#5a5b63" stroke-width="3"/></svg>' },
   };
 
   function upgradeKeys() {
     return Object.keys(UPGRADES).filter((k) => k !== 'tunnels' || G.map.hills > 0);
   }
 
-  // Three different choices. The basics turn up twice as often as the rest.
+  // Three different choices: always one of road tiles, a bridge or a tunnel,
+  // always a roundabout or a motorway, then one more from anything left.
   function pickUpgrades() {
-    const pool = upgradeKeys().map((k) => ({ k, w: UPGRADES[k].rare ? 1 : 2 }));
+    const keys = upgradeKeys();
     const out = [];
-    while (out.length < 3 && pool.length) {
-      let r = Math.random() * pool.reduce((s, p) => s + p.w, 0);
-      let i = 0;
-      while ((r -= pool[i].w) > 0) i++;
-      out.push(pool.splice(i, 1)[0].k);
-    }
+    const take = (list) => {
+      const pool = list.filter((k) => keys.includes(k) && !out.includes(k));
+      if (pool.length) out.push(pick(pool));
+    };
+    take(['roads', 'bridges', 'tunnels']);
+    take(['rounds', 'motors']);
+    take(keys);
     return out;
   }
 
@@ -1330,6 +1407,8 @@
     }
     Object.assign(G.res, data.res);
     G.owned = data.owned || {};
+    undoStack = [];
+    pendingSnap = null;
     Object.assign(G, {
       time: data.time, week: data.week, weekT: data.weekT, score: data.score, bounds: data.bounds,
       colorsUsed: data.colorsUsed, nextHouse: data.nextHouse, nextDest: data.nextDest, speed: data.speed || 1,
@@ -1444,34 +1523,12 @@
     a.last = c;
   }
 
-  // Drag along a road in the direction traffic should flow.
-  function onewayMove(wx, wy, a) {
-    const c = tileAtWorld(wx, wy);
-    if (c < 0 || c === a.last) return;
-    if (a.last < 0) { a.last = c; return; }
-    const cx = tx(c) + 0.5, cy = ty(c) + 0.5;
-    const cheb = Math.max(Math.abs(tx(c) - tx(a.last)), Math.abs(ty(c) - ty(a.last)));
-    if (cheb <= 1 && Math.hypot(wx - cx, wy - cy) > 0.46) return;
-    let cur = a.last, guard = 0;
-    while (cur !== c && guard++ < 64) {
-      const nx = stepToward(cur, c);
-      const r = setOneWay(nodeFor(cur, nx), nodeFor(nx, cur));
-      if (r === 'ok') a.changed = true;
-      if (r === 'none' && !a.warned) { toast('No one-way streets left.'); a.warned = true; }
-      cur = nx;
-    }
-    a.last = c;
-  }
-
   let moveFrom = null;
 
   // Taps for the upgrade tools. Each returns to the road tool once used up.
   function tapTool(t, c) {
     const done = (key) => { if (G.res[key] <= 0) setTool('road'); };
-    if (t === 'overpass') { if (placeOverpass(c)) done('overpasses'); }
-    else if (t === 'entrance') { if (addEntrance(c)) done('entrances'); }
-    else if (t === 'carpark') { if (enlargeCarPark(c)) done('carparks'); }
-    else if (t === 'bus') { if (makeBus(c)) done('buses'); }
+    if (t === 'entrance') { if (addEntrance(c)) done('entrances'); }
     else if (t === 'dozer') { if (bulldoze(c)) done('dozers'); }
     else if (t === 'move') {
       const o = G.occ[c];
@@ -1503,14 +1560,14 @@
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size === 1 && !gestureLock) {
       const wx = wxOf(e.clientX), wy = wyOf(e.clientY);
+      commitUndo();
+      if (UNDO_TOOLS.has(tool)) pendingSnap = snapNet();
       action = { tool, sx: e.clientX, sy: e.clientY, moved: false, last: -1, warned: false };
       if (tool === 'road') {
         const c = tileAtWorld(wx, wy);
         if (c >= 0 && kind(c) !== null && inB(tx(c), ty(c))) action.last = c;
       } else if (tool === 'erase') {
         eraseMove(wx, wy, action);
-      } else if (tool === 'oneway') {
-        onewayMove(wx, wy, action);
       }
     } else if (pointers.size === 2) {
       action = null;
@@ -1553,7 +1610,6 @@
       const wx = wxOf(ev.clientX), wy = wyOf(ev.clientY);
       if (action.tool === 'road') roadMove(wx, wy, action);
       else if (action.tool === 'erase') eraseMove(wx, wy, action);
-      else if (action.tool === 'oneway') onewayMove(wx, wy, action);
     }
   }
 
@@ -1565,12 +1621,11 @@
     if (!action) return;
     const a = action;
     action = null;
-    if (a.tool === 'oneway' && a.changed && G.res.oneways <= 0) setTool('road');
+    setTimeout(commitUndo, 0); // after this lift's taps have been applied
     if (a.moved || e.type === 'pointercancel') return;
     const c = tileAtWorld(wxOf(e.clientX), wyOf(e.clientY));
     if (c < 0) return;
-    if (a.tool === 'oneway') toast('Drag along a road in the direction cars should go.');
-    else tapTool(a.tool, c);
+    tapTool(a.tool, c);
     if (a.tool === 'round') {
       if (placeRoundabout(c) && G.res.rounds <= 0) setTool('road');
     } else if (a.tool === 'motor') {
@@ -1746,6 +1801,13 @@
     ctx.beginPath();
     for (const e of roadEdges) line(e);
     ctx.stroke();
+    // jams: roads where cars are crawling turn red
+    ctx.lineWidth = s * 0.5;
+    for (const e of roadEdges) {
+      if (!(e.jam > 0.06)) continue;
+      ctx.strokeStyle = `rgba(226,74,40,${Math.min(0.8, e.jam * 0.9).toFixed(3)})`;
+      ctx.beginPath(); line(e); ctx.stroke();
+    }
     // one-way arrows
     ctx.strokeStyle = 'rgba(255,255,255,0.75)';
     ctx.lineWidth = Math.max(1.2, s * 0.06);
@@ -1843,6 +1905,10 @@
       ctx.strokeStyle = PAL.motor;
       ctx.lineWidth = s * 0.66;
       ctx.beginPath(); line(e); ctx.stroke();
+      if (e.jam > 0.06) {
+        ctx.strokeStyle = `rgba(226,74,40,${Math.min(0.8, e.jam * 0.9).toFixed(3)})`;
+        ctx.beginPath(); line(e); ctx.stroke();
+      }
       ctx.strokeStyle = PAL.motorLine;
       ctx.lineWidth = Math.max(1, s * 0.05);
       ctx.setLineDash([s * 0.2, s * 0.25]);
@@ -1934,6 +2000,22 @@
     }
   }
 
+  // One shape per colour, so colours can be told apart without relying on hue.
+  function drawSymbol(color, cx, cy, r, fill) {
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = fill;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    switch (color % 6) {
+      case 0: ctx.arc(cx, cy, r * 0.8, 0, Math.PI * 2); ctx.fill(); break;
+      case 1: ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r * 0.95, cy + r * 0.7); ctx.lineTo(cx - r * 0.95, cy + r * 0.7); ctx.closePath(); ctx.fill(); break;
+      case 2: ctx.rect(cx - r * 0.72, cy - r * 0.72, r * 1.44, r * 1.44); ctx.fill(); break;
+      case 3: ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r * 0.8, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r * 0.8, cy); ctx.closePath(); ctx.fill(); break;
+      case 4: ctx.lineWidth = r * 0.55; ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy); ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r); ctx.stroke(); break;
+      default: ctx.lineWidth = r * 0.55; ctx.moveTo(cx - r * 0.75, cy - r * 0.75); ctx.lineTo(cx + r * 0.75, cy + r * 0.75); ctx.moveTo(cx + r * 0.75, cy - r * 0.75); ctx.lineTo(cx - r * 0.75, cy + r * 0.75); ctx.stroke();
+    }
+  }
+
   function drawHouse(h) {
     const s = cam.s;
     const x = tx(h.i), y = ty(h.i);
@@ -1948,21 +2030,25 @@
     ctx.fillStyle = col.fill;
     rr(cx - size / 2, cy - size / 2, size, size, size * 0.22);
     ctx.fill();
-    // roof ridge
-    ctx.strokeStyle = col.dark;
-    ctx.lineWidth = Math.max(1, s * 0.06);
-    ctx.beginPath();
-    ctx.moveTo(cx - size * 0.28, cy - size * 0.02);
-    ctx.lineTo(cx, cy - size * 0.26);
-    ctx.lineTo(cx + size * 0.28, cy - size * 0.02);
-    ctx.stroke();
+    if (shapesOn) {
+      drawSymbol(h.color, cx, cy - size * 0.1, size * 0.2, '#fff');
+    } else {
+      // roof ridge
+      ctx.strokeStyle = col.dark;
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      ctx.beginPath();
+      ctx.moveTo(cx - size * 0.28, cy - size * 0.02);
+      ctx.lineTo(cx, cy - size * 0.26);
+      ctx.lineTo(cx + size * 0.28, cy - size * 0.02);
+      ctx.stroke();
+    }
     // cars at home
     let home = 0;
     for (const c of G.cars) if (c.house === h && c.state === 'home') home++;
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = shapesOn ? col.dark : '#fff';
     for (let n = 0; n < home; n++) {
       ctx.beginPath();
-      ctx.arc(cx + (n - (home - 1) / 2) * size * 0.26, cy + size * 0.2, s * 0.055, 0, Math.PI * 2);
+      ctx.arc(cx + (n - (home - 1) / 2) * size * 0.26, cy + size * (shapesOn ? 0.29 : 0.2), s * 0.05, 0, Math.PI * 2);
       ctx.fill();
     }
     if (h.cut) {
@@ -2005,6 +2091,15 @@
 
     const waiting = Math.max(0, d.pins - d.assigned);
     const over = waiting > PIN_LIMIT;
+    if (d.cut && !over) {
+      // no matching house can reach it yet: same pulse ring as a cut-off house
+      const pulse = 0.5 + 0.5 * Math.sin(G.time * 4 + d.id);
+      ctx.strokeStyle = col.fill;
+      ctx.globalAlpha = 0.25 + 0.35 * pulse;
+      ctx.lineWidth = Math.max(1.5, s * 0.08);
+      ctx.beginPath(); ctx.arc(cx, cy, w * 0.82, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
     const shake = over ? Math.sin(G.time * 30) * s * 0.03 : 0;
     ctx.fillStyle = 'rgba(0,0,0,0.16)';
     rr(cx - w / 2 + s * 0.08, cy - w / 2 + s * 0.12, w, w, s * 0.28);
@@ -2036,6 +2131,13 @@
       }
     }
 
+    if (shapesOn) {
+      const bx = cx + w / 2 - s * 0.08, by = cy - w / 2 + s * 0.08;
+      ctx.fillStyle = col.dark;
+      ctx.beginPath(); ctx.arc(bx, by, s * 0.3, 0, Math.PI * 2); ctx.fill();
+      drawSymbol(d.color, bx, by, s * 0.16, '#fff');
+    }
+
     if (d.overflow > 0.001) {
       const R = s * 1.35;
       ctx.lineCap = 'round';
@@ -2052,7 +2154,7 @@
     top: $('#top'), bottom: $('#bottom'), score: $('#score'), weekLabel: $('#weekLabel'), weekBar: $('#weekBar'),
     cRoads: $('#cRoads'), cRounds: $('#cRounds'), cMotors: $('#cMotors'), cBridges: $('#cBridges'),
     cTunnels: $('#cTunnels'), tunnelTool: $('#tunnelTool'), scoreSub: $('#scoreSub'),
-    cut: $('#cutPill'), cCut: $('#cCut'), btnFit: $('#btnFit'),
+    cut: $('#cutPill'), cCut: $('#cCut'), btnFit: $('#btnFit'), btnUndo: $('#btnUndo'),
     btnPause: $('#btnPause'), btnSpeed: $('#btnSpeed'), toast: $('#toast'),
   };
   const ICON_PAUSE = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>';
@@ -2063,7 +2165,7 @@
     if (!G) return;
     const zoomed = user.zoom > 1.02;
     const key = [G.score, G.week, Math.floor(G.weekT), JSON.stringify(G.res), Object.keys(G.owned).join(), G.bridgesUsed,
-      G.tunnelsUsed, G.cutOff, G.targetHit, zoomed, G.map.id, G.paused, G.speed, tool].join('|');
+      G.tunnelsUsed, G.cutOff, G.targetHit, zoomed, undoStack.length, !!(pendingSnap && pendingSnap.ver !== G.gver), G.map.id, G.paused, G.speed, tool].join('|');
     el.weekBar.style.width = (G.weekT / WEEK_LEN * 100).toFixed(1) + '%';
     if (key === hudCache) return;
     hudCache = key;
@@ -2073,6 +2175,7 @@
     el.cut.classList.toggle('alert', G.cutOff > 0);
     el.cut.setAttribute('aria-label', `${G.cutOff} ${G.cutOff === 1 ? 'house' : 'houses'} cut off`);
     el.btnFit.hidden = !zoomed;
+    el.btnUndo.hidden = !undoStack.length && !(pendingSnap && pendingSnap.ver !== G.gver);
     el.weekLabel.textContent = `Week ${G.week}`;
     el.cRoads.textContent = G.res.roads;
     el.cRoads.classList.toggle('zero', G.res.roads === 0);
@@ -2141,10 +2244,9 @@
     const t = b.dataset.tool;
     const k = b.dataset.res;
     if (k && G.res[k] <= 0) {
-      if (t === 'oneway' && tool !== 'oneway') { setTool(t); toast('No one-way streets left, but you can still flip existing ones.'); return; }
       const names = {
-        rounds: 'roundabouts', motors: 'motorways', overpasses: 'overpasses', entrances: 'entrances',
-        carparks: 'car park upgrades', buses: 'buses', dozers: 'bulldozer uses', moves: 'house moves',
+        rounds: 'roundabouts', motors: 'motorways', entrances: 'extra car parks',
+        dozers: 'bulldozer uses', moves: 'house moves',
       };
       toast(`No ${names[k]} left. You can pick more at the end of a week.`);
       return;
@@ -2154,11 +2256,7 @@
       round: 'Tap a junction to add a roundabout.',
       motor: 'Tap where the motorway should start.',
       erase: 'Drag over roads to remove them. You get the tiles back.',
-      oneway: 'Drag along a road in the direction cars should go. Drag the other way to flip it.',
-      overpass: 'Tap a crossroads. The east-west road goes over the top.',
-      entrance: 'Tap an empty tile next to a building to add another entrance.',
-      carpark: 'Tap a building to give it a bigger car park.',
-      bus: 'Tap a house to swap its two cars for a bus.',
+      entrance: 'Tap a building to add another car park.',
       dozer: 'Tap a hill or water tile to turn it into land.',
       move: 'Tap a house, then tap where it should go.',
     };
@@ -2172,6 +2270,14 @@
   $('#btnRestart').addEventListener('click', () => { closeScreen(); startNew(G.map); });
   $('#btnMenuMaps').addEventListener('click', () => { save(); showMaps('sMenu'); });
   el.btnFit.addEventListener('click', () => { user.zoom = 1; user.px = 0; user.py = 0; hudCache = ''; });
+  el.btnUndo.addEventListener('click', () => { if (G) undo(); });
+  $('#btnShapes').addEventListener('click', () => {
+    shapesOn = !shapesOn;
+    try { localStorage.setItem(SHAPES_KEY, shapesOn ? '1' : '0'); } catch (e) { /* storage unavailable */ }
+    shapesLabel();
+  });
+  function shapesLabel() { $('#btnShapes').textContent = `Colour shapes: ${shapesOn ? 'on' : 'off'}`; }
+  shapesLabel();
   el.cut.addEventListener('click', () => {
     toast(G.cutOff ? `${G.cutOff} ${G.cutOff === 1 ? 'house has' : 'houses have'} no road to a building of the same colour. Look for pulsing rings.` : 'Every house can reach its building.');
   });
@@ -2348,5 +2454,5 @@
   requestAnimationFrame(frame);
 
   // exposed for testing in the browser console
-  window.__byways = { get G() { return G; }, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress, placeOverpass, setOneWay, addEntrance, enlargeCarPark, makeBus, bulldoze, moveHouse, canGo, nodeFor, deck, showUpgrade, dispatch };
+  window.__byways = { get G() { return G; }, landAreas, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress, addEntrance, bulldoze, moveHouse, canGo, nodeFor, deck, showUpgrade, dispatch };
 })();
