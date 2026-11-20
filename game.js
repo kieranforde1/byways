@@ -30,7 +30,7 @@
     mountLight: '#d8ccb6',
   };
 
-  const CAR_SPEED = 1.9;        // tiles per second
+  const CAR_SPEED = 1.6;        // tiles per second
   const MOTOR_SPEED = 4.2;
   const GAP = 0.55;             // spacing between queued cars
   const CROSS = 0.7;            // seconds a 3-way junction is blocked per car
@@ -39,9 +39,10 @@
   const GATE_CROSS = 0.45;      // cars take turns at a car park gate, in or out
   const INTER_PENALTY = 0.45;   // routing cost of passing a plain junction
   const DWELL = 0.8;
-  const PIN_LIMIT = 5;          // waiting visitors (no car on the way) before the timer starts
-  const OVER_FILL = 1 / 30;     // overflow timer fills in 30s
-  const OVER_DRAIN = 1 / 12;
+  const PIN_LIMIT = 5;          // waiting visitors (no car on the way, or one stuck in traffic) before the timer starts
+  const OVER_FILL = 1 / 60;     // overflow timer fills in 60s
+  const OVER_DRAIN = 1 / 30;    // and empties at half that speed once things improve
+  const LATE = 3;               // seconds stuck in traffic before a car's visitor counts as waiting again
   const WEEK_LEN = 70;
   const CARS_PER_HOUSE = 2;
   const MAX_SPAN = 6;           // longest bridge or tunnel, in tiles
@@ -62,22 +63,22 @@
   // appear in different spots every game.
   const MAPS = [
     {
-      id: 'millbrook', name: 'Millbrook', seed: 7193, target: 1000, demand: 1,
+      id: 'millbrook', name: 'Millbrook', seed: 7193, target: 500, demand: 1,
       blurb: 'A quiet town split by one river.',
       rivers: [{ axis: 'v', pos: 0.42 }], lakes: 1, hills: 0, bridges: 1, tunnels: 0,
     },
     {
-      id: 'twinford', name: 'Twinford', seed: 4410, target: 1000, demand: 1.1,
+      id: 'twinford', name: 'Twinford', seed: 4410, target: 650, demand: 1.3,
       blurb: 'Two rivers cross in the middle of town. Bridges are precious.',
       rivers: [{ axis: 'v', pos: 0.4 }, { axis: 'h', pos: 0.58 }], lakes: 0, hills: 0, bridges: 2, tunnels: 0,
     },
     {
-      id: 'stonehill', name: 'Stonehill', seed: 2231, target: 1100, demand: 1.15,
+      id: 'stonehill', name: 'Stonehill', seed: 2231, target: 800, demand: 0.9,
       blurb: 'Hills block the way. Build around them or tunnel through.',
       rivers: [{ axis: 'v', pos: 0.66 }], lakes: 0, hills: 6, bridges: 1, tunnels: 1,
     },
     {
-      id: 'cragmoor', name: 'Cragmoor', seed: 9067, target: 1200, demand: 1.25,
+      id: 'cragmoor', name: 'Cragmoor', seed: 9067, target: 950, demand: 1.05,
       blurb: 'Rivers, lakes and hills everywhere. Every tile counts.',
       rivers: [{ axis: 'v', pos: 0.32 }, { axis: 'v', pos: 0.7 }], lakes: 2, hills: 7, bridges: 2, tunnels: 1,
     },
@@ -166,13 +167,13 @@
     const x0 = Math.floor((W - bw) / 2);
     const y0 = Math.floor((H - bh) / 2);
     G.bounds = { x0, y0, x1: x0 + bw - 1, y1: y0 + bh - 1 };
+    fitBoundsToScreen();
 
     const d = spawnDest(0);
     G.colorsUsed = 1;
     if (d) {
-      spawnHouse(0, { x: d.x + 0.5, y: d.y + 0.5, rmin: 3, rmax: 6 });
-      spawnHouse(0, { x: d.x + 0.5, y: d.y + 0.5, rmin: 3, rmax: 6 });
-      d.pinT = 4;
+      for (let k = 0; k < 3; k++) spawnHouse(0, { x: d.x + 0.5, y: d.y + 0.5, rmin: 4, rmax: 7 });
+      d.pinT = 3;
     }
     user.zoom = 1; user.px = 0; user.py = 0;
     camSnap = true;
@@ -214,7 +215,7 @@
       speed: 1, paused: false, over: false,
       bounds: { x0: 0, y0: 0, x1: W - 1, y1: H - 1 },
       colorsUsed: 0,
-      nextHouse: 6,
+      nextHouse: 4,
       nextDest: 32,
       dispatchT: 0,
       saveT: 0,
@@ -513,6 +514,26 @@
     B.x1 = Math.min(G.W - 1, B.x1 + 1);
     B.y0 = Math.max(0, B.y0 - 1);
     B.y1 = Math.min(G.H - 1, B.y1 + 1);
+    fitBoundsToScreen();
+  }
+
+  // Grow the open land along its shorter side until it has the same shape as
+  // the space on screen, so none of the screen is wasted on locked land.
+  function fitBoundsToScreen() {
+    const B = G.bounds;
+    const availW = Math.max(100, view.w - view.right);
+    const availH = Math.max(100, view.h - view.top - view.bottom);
+    const ratio = availH / availW;
+    for (let guard = 0; guard < 40; guard++) {
+      const bw = B.x1 - B.x0 + 1.6, bh = B.y1 - B.y0 + 1.6;
+      if (bh / bw < ratio - 0.04) {
+        if (B.y0 === 0 && B.y1 === G.H - 1) break;
+        if ((guard % 2 === 0 && B.y0 > 0) || B.y1 === G.H - 1) B.y0--; else B.y1++;
+      } else if (bw / bh < 1 / ratio - 0.04) {
+        if (B.x0 === 0 && B.x1 === G.W - 1) break;
+        if ((guard % 2 === 0 && B.x0 > 0) || B.x1 === G.W - 1) B.x0--; else B.x1++;
+      } else break;
+    }
   }
 
   // ---------------------------------------------------------------- graph
@@ -1158,10 +1179,13 @@
   // The level eases up and down so the red tint doesn't flicker.
   function updateJams(dt) {
     const stuck = new Map();
+    for (const d of G.dests) d.late = 0;
     for (const c of G.cars) {
-      if (c.state !== 'drive' || c.dk !== c.prevDk) continue;
+      if (c.state !== 'drive' || c.dk !== c.prevDk) { c.stuckT = 0; continue; }
       const free = (c.motor ? MOTOR_SPEED : CAR_SPEED) * (c.bus ? BUS_SPEED : 1) * dt;
-      if (c.t - c.prevT >= free * 0.4) continue;
+      if (c.t - c.prevT >= free * 0.4) { c.stuckT = 0; continue; }
+      c.stuckT = (c.stuckT || 0) + dt;
+      if (c.leg === 'out' && c.dest && c.stuckT > LATE) c.dest.late += c.load || 1;
       const e = G.adj[c.path[c.s]].get(c.path[c.s + 1]);
       if (e) stuck.set(e, (stuck.get(e) || 0) + 1);
     }
@@ -1173,9 +1197,21 @@
   }
 
   // ---------------------------------------------------------------- simulation
+  // More visitors from the start, so you can see where traffic will build up,
+  // and a gentler climb after that.
   function pinInterval() {
-    return Math.max(0.9, 8 * Math.pow(0.84, G.week - 1)) / G.map.demand;
+    return Math.max(1, 3 * Math.pow(0.93, G.week - 1)) / G.map.demand;
   }
+
+  // Visitors with no car on the way, plus those whose car is stuck in a jam.
+  const waitingAt = (d) => Math.max(0, d.pins - d.assigned + (d.late || 0));
+  // 0 when calm. Starts once 3 visitors are waiting, then climbs with the
+  // timer once it's past the limit. Drives both the warning pulse and the sound.
+  const urgencyOf = (d) => {
+    const w = waitingAt(d);
+    return w > PIN_LIMIT ? 0.4 + 0.6 * d.overflow : w > 2 ? (0.3 * (w - 2)) / (PIN_LIMIT - 2) : 0;
+  };
+  const pulsePeriod = (u) => 1.4 - 0.95 * u;
 
   function step(dt) {
     G.time += dt;
@@ -1188,7 +1224,7 @@
       }
       // Only visitors with no car on the way count towards the timer, so
       // what fails you is cars being stuck or too few houses, not distance.
-      if (d.pins - d.assigned > PIN_LIMIT) d.overflow += OVER_FILL * dt;
+      if (waitingAt(d) > PIN_LIMIT) d.overflow += OVER_FILL * dt;
       else d.overflow = Math.max(0, d.overflow - OVER_DRAIN * dt);
       if (d.overflow >= 1) { gameOver(d); return; }
     }
@@ -1201,7 +1237,7 @@
     G.nextHouse -= dt;
     if (G.nextHouse <= 0) {
       spawnHouse(chooseHouseColor(), null);
-      G.nextHouse = Math.max(3.6, 9 - 0.4 * (G.week - 1)) * rnd(0.75, 1.25);
+      G.nextHouse = Math.max(3.4, 6.5 - 0.35 * (G.week - 1)) * rnd(0.75, 1.25);
     }
     G.nextDest -= dt;
     if (G.nextDest <= 0) {
@@ -1422,8 +1458,8 @@
   // ---------------------------------------------------------------- camera
   function baseCam() {
     const B = G.bounds;
-    const bw = B.x1 - B.x0 + 2;
-    const bh = B.y1 - B.y0 + 2;
+    const bw = B.x1 - B.x0 + 1.6;
+    const bh = B.y1 - B.y0 + 1.6;
     const availH = Math.max(100, view.h - view.top - view.bottom);
     const availW = Math.max(100, view.w - view.right);
     const s = Math.min(availW / bw, availH / bh);
@@ -1435,8 +1471,8 @@
     const s = b.s * user.zoom;
     // Only allow panning as far as zoom makes room for, so the town stays on screen.
     const slack = 1 - 1 / user.zoom;
-    const hx = ((B.x1 - B.x0 + 2) / 2) * slack;
-    const hy = ((B.y1 - B.y0 + 2) / 2) * slack;
+    const hx = ((B.x1 - B.x0 + 1.6) / 2) * slack;
+    const hy = ((B.y1 - B.y0 + 1.6) / 2) * slack;
     user.px = clamp(user.px, -hx, hx);
     user.py = clamp(user.py, -hy, hy);
     return { x: b.x + user.px, y: b.y + user.py, s };
@@ -2089,7 +2125,7 @@
       ctx.fillText('P', px, py + s * 0.02);
     }
 
-    const waiting = Math.max(0, d.pins - d.assigned);
+    const waiting = waitingAt(d);
     const over = waiting > PIN_LIMIT;
     if (d.cut && !over) {
       // no matching house can reach it yet: same pulse ring as a cut-off house
@@ -2100,13 +2136,32 @@
       ctx.beginPath(); ctx.arc(cx, cy, w * 0.82, 0, Math.PI * 2); ctx.stroke();
       ctx.globalAlpha = 1;
     }
-    const shake = over ? Math.sin(G.time * 30) * s * 0.03 : 0;
+    const u = urgencyOf(d);
+    const phase = u > 0 ? (G.time % pulsePeriod(u)) / pulsePeriod(u) : 0;
+    if (u > 0) {
+      // ripples spreading out from the building, faster and stronger as it fills
+      ctx.strokeStyle = over ? col.dark : col.fill;
+      ctx.lineWidth = Math.max(2, s * (0.08 + 0.14 * u));
+      for (const off of [0, 0.5]) {
+        const p = (phase + off) % 1;
+        ctx.globalAlpha = (1 - p) * (0.35 + 0.6 * u);
+        ctx.beginPath(); ctx.arc(cx, cy, w * (0.62 + 0.8 * p), 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    const shake = over ? Math.sin(G.time * 30) * s * 0.04 : 0;
     ctx.fillStyle = 'rgba(0,0,0,0.16)';
     rr(cx - w / 2 + s * 0.08, cy - w / 2 + s * 0.12, w, w, s * 0.28);
     ctx.fill();
     ctx.fillStyle = col.fill;
     rr(cx - w / 2 + shake, cy - w / 2, w, w, s * 0.28);
     ctx.fill();
+    if (over) {
+      // the building flashes bright on each pulse
+      ctx.fillStyle = `rgba(255,255,255,${0.55 * Math.max(0, 1 - phase * 2.5)})`;
+      rr(cx - w / 2 + shake, cy - w / 2, w, w, s * 0.28);
+      ctx.fill();
+    }
     ctx.strokeStyle = col.dark;
     ctx.lineWidth = Math.max(1, s * 0.06);
     rr(cx - w / 2 + shake + s * 0.18, cy - w / 2 + s * 0.18, w - s * 0.36, w - s * 0.36, s * 0.16);
@@ -2139,10 +2194,13 @@
     }
 
     if (d.overflow > 0.001) {
-      const R = s * 1.35;
+      const R = s * 1.4;
       ctx.lineCap = 'round';
-      ctx.strokeStyle = 'rgba(36,38,44,0.25)';
-      ctx.lineWidth = s * 0.16;
+      ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+      ctx.lineWidth = s * 0.34;
+      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(36,38,44,0.22)';
+      ctx.lineWidth = s * 0.24;
       ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
       ctx.strokeStyle = col.dark;
       ctx.beginPath(); ctx.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.min(1, d.overflow)); ctx.stroke();
@@ -2426,7 +2484,7 @@
   // ---------------------------------------------------------------- sound
   // Lo-fi music made live in the browser, so there are no audio files to
   // download and it works offline: a slow four-chord loop, a soft beat and
-  // vinyl crackle. When a building fills up, a low pulse fades in from its
+  // gentle rain. When a building fills up, a low pulse fades in from its
   // side of the screen and speeds up as its timer runs down.
   const SOUND_KEY = 'byways-sound';
   let soundOn = true;
@@ -2471,21 +2529,36 @@
       snd.noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
       const nd = snd.noise.getChannelData(0);
       for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
-      // vinyl crackle: faint hiss with the odd pop, on a loop
-      const vinyl = ctx.createBuffer(1, ctx.sampleRate * 3, ctx.sampleRate);
-      const vd = vinyl.getChannelData(0);
-      for (let i = 0; i < vd.length; i++) vd[i] = (Math.random() * 2 - 1) * (Math.random() < 0.0006 ? 0.8 : 0.012);
-      const crackle = ctx.createBufferSource();
-      crackle.buffer = vinyl;
-      crackle.loop = true;
-      const band = ctx.createBiquadFilter();
-      band.type = 'bandpass';
-      band.frequency.value = 2500;
-      band.Q.value = 0.7;
-      const cg = ctx.createGain();
-      cg.gain.value = 0.2;
-      crackle.connect(band); band.connect(cg); cg.connect(snd.master);
-      crackle.start();
+      // gentle rain: soft, slowly swelling hiss with the odd quiet droplet, on a loop
+      const sr = ctx.sampleRate;
+      const rainBuf = ctx.createBuffer(1, sr * 7, sr);
+      const rd = rainBuf.getChannelData(0);
+      let soft = 0;
+      for (let i = 0; i < rd.length; i++) {
+        soft = soft * 0.92 + (Math.random() * 2 - 1) * 0.08;
+        const swell = 0.75 + 0.25 * Math.sin((i / rd.length) * Math.PI * 2);
+        rd[i] = soft * 0.5 * swell;
+      }
+      for (let k = 0; k < 160; k++) {
+        const at = Math.floor(Math.random() * (rd.length - sr * 0.05));
+        const f = 1800 + Math.random() * 2600;
+        const amp = 0.02 + Math.random() * 0.05;
+        const len = Math.floor(sr * (0.015 + Math.random() * 0.02));
+        for (let n = 0; n < len; n++) rd[at + n] += amp * Math.exp(-n / (len * 0.25)) * Math.sin((2 * Math.PI * f * n) / sr);
+      }
+      const rain = ctx.createBufferSource();
+      rain.buffer = rainBuf;
+      rain.loop = true;
+      const rainHi = ctx.createBiquadFilter();
+      rainHi.type = 'highpass';
+      rainHi.frequency.value = 350;
+      const rainLo = ctx.createBiquadFilter();
+      rainLo.type = 'lowpass';
+      rainLo.frequency.value = 3200;
+      const rg = ctx.createGain();
+      rg.gain.value = 0.15;
+      rain.connect(rainHi); rainHi.connect(rainLo); rainLo.connect(rg); rg.connect(snd.master);
+      rain.start();
       snd.next = ctx.currentTime + 0.1;
     }
     if (snd.ctx.state !== 'running') snd.ctx.resume().catch(() => {});
@@ -2564,9 +2637,17 @@
       p.connect(snd.master);
       out = p;
     }
-    kick(t, 0.05 + 0.3 * u, out);
+    kick(t, 0.05 + 0.4 * u, out);
     const chord = CHORDS[(snd.step >> 3) % 4];
-    voice('sine', hz(chord[0] + 24), t, 0.7, 0.025 + 0.05 * u, 0.01, out);
+    voice('sine', hz(chord[0] + 24), t, 0.7, 0.03 + 0.07 * u, 0.01, out);
+    if (u >= 0.4) {
+      // past the limit: a second, higher chime, and the music dips so it cuts through
+      voice('sine', hz(chord[0] + 31), t + 0.09, 0.6, 0.02 + 0.06 * u, 0.01, out);
+      snd.music.gain.setTargetAtTime(0.7, t, 0.03);
+      snd.music.gain.setTargetAtTime(1, t + 0.25, 0.3);
+    }
+    // close to failing: the thump doubles up like a heartbeat
+    if (u >= 0.7) kick(t + 0.2, 0.3 * u, out);
   }
 
   function audioTick() {
@@ -2586,14 +2667,13 @@
     let u = 0, pan = 0;
     if (live) {
       for (const d of G.dests) {
-        const w = d.pins - d.assigned;
-        const v = w > PIN_LIMIT ? 0.4 + 0.6 * d.overflow : w > 2 ? (0.3 * (w - 2)) / (PIN_LIMIT - 2) : 0;
+        const v = urgencyOf(d);
         if (v > u) { u = v; pan = clamp((sx(d.x + 1) / view.w) * 2 - 1, -1, 1) * 0.6; }
       }
     }
     if (u > 0.01 && now >= snd.pulseAt) {
       pulse(now + 0.02, u, pan);
-      snd.pulseAt = now + 1.4 - 0.95 * u;
+      snd.pulseAt = now + pulsePeriod(u);
     }
     snd.tone.frequency.setTargetAtTime(1300 + 1500 * u, now, 0.5);
   }
