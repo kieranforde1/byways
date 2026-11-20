@@ -217,6 +217,8 @@
       colorsUsed: 0,
       nextHouse: 4,
       nextDest: 32,
+      rush: null,      // { color, left, mult } while a rush hour is on
+      nextRush: 150,
       dispatchT: 0,
       saveT: 0,
       nextId: 1,
@@ -1199,8 +1201,47 @@
   // ---------------------------------------------------------------- simulation
   // More visitors from the start, so you can see where traffic will build up,
   // and a gentler climb after that.
-  function pinInterval() {
-    return Math.max(1, 3 * Math.pow(0.93, G.week - 1)) / G.map.demand;
+  // The climb never stops: late weeks keep getting busier until the roads give out.
+  function pinInterval(d) {
+    const rush = G.rush && G.rush.color === d.color ? G.rush.mult : 1;
+    return Math.max(0.3, 3 * Math.pow(0.93, G.week - 1)) / G.map.demand / rush;
+  }
+
+  // Rush hour: every building of one colour gets a burst of visitors for a short while.
+  const RUSH_FROM_WEEK = 6;
+  function updateRush(dt) {
+    if (G.rush) {
+      G.rush.left -= dt;
+      if (G.rush.left <= 0) G.rush = null;
+      return;
+    }
+    if (G.week < RUSH_FROM_WEEK) return;
+    G.nextRush -= dt;
+    if (G.nextRush > 0) return;
+    const colors = [...new Set(G.dests.map((d) => d.color))];
+    if (!colors.length) return;
+    const color = pick(colors);
+    const mult = 2 + Math.min(1.5, (G.week - RUSH_FROM_WEEK) * 0.08);
+    G.rush = { color, left: 18, mult };
+    G.nextRush = rnd(55, 80) * Math.max(0.5, 1 - (G.week - RUSH_FROM_WEEK) * 0.02);
+    toast(`Rush hour: ${COLORS[color].name} buildings are getting busy.`);
+  }
+
+  // When the map has no room for new houses, an old household moves out and a
+  // new one (maybe a different colour) moves in, so the roads slowly go out of date.
+  function churnHouse() {
+    const movable = G.houses.filter((h) => !h.bus && G.cars.every((c) => c.house !== h || c.state === 'home'));
+    if (!movable.length) return;
+    const h = pick(movable);
+    const i = h.i;
+    for (const n of [...G.adj[i].keys()]) removeEdge(i, n);
+    G.occ[i] = null;
+    G.houses = G.houses.filter((x) => x !== h);
+    G.cars = G.cars.filter((c) => c.house !== h);
+    G.fx.push({ type: 'poof', x: tx(i) + 0.5, y: ty(i) + 0.5, t: 0 });
+    const nh = spawnHouse(chooseHouseColor(), null);
+    if (nh) G.fx.push({ type: 'poof', x: tx(nh.i) + 0.5, y: ty(nh.i) + 0.5, t: 0 });
+    graphChanged();
   }
 
   // Visitors with no car on the way, plus those whose car is stuck in a jam.
@@ -1220,7 +1261,7 @@
       d.pinT -= dt;
       if (d.pinT <= 0) {
         d.pins++;
-        d.pinT = pinInterval() * rnd(0.7, 1.3);
+        d.pinT = pinInterval(d) * rnd(0.7, 1.3);
       }
       // Only visitors with no car on the way count towards the timer, so
       // what fails you is cars being stuck or too few houses, not distance.
@@ -1236,9 +1277,10 @@
 
     G.nextHouse -= dt;
     if (G.nextHouse <= 0) {
-      spawnHouse(chooseHouseColor(), null);
+      if (!spawnHouse(chooseHouseColor(), null)) churnHouse();
       G.nextHouse = Math.max(3.4, 6.5 - 0.35 * (G.week - 1)) * rnd(0.75, 1.25);
     }
+    updateRush(dt);
     G.nextDest -= dt;
     if (G.nextDest <= 0) {
       spawnNewDest();
@@ -2150,6 +2192,16 @@
       ctx.lineWidth = Math.max(1.5, s * 0.08);
       ctx.beginPath(); ctx.arc(cx, cy, w * 0.82, 0, Math.PI * 2); ctx.stroke();
       ctx.globalAlpha = 1;
+    }
+    if (G.rush && G.rush.color === d.color) {
+      // rush hour: a dashed ring spins round the building
+      ctx.save();
+      ctx.strokeStyle = col.dark;
+      ctx.lineWidth = Math.max(2, s * 0.1);
+      ctx.setLineDash([s * 0.28, s * 0.22]);
+      ctx.lineDashOffset = -G.time * s * 0.6;
+      ctx.beginPath(); ctx.arc(cx, cy, w * 0.78, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
     }
     const u = urgencyOf(d);
     const phase = u > 0 ? (G.time % pulsePeriod(u)) / pulsePeriod(u) : 0;
