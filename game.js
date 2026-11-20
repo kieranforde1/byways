@@ -726,7 +726,7 @@
     const ka = kind(a), kb = kind(b);
     const okKind = (k) => k === 'road' || k === 'land';
     if (!okKind(ka) || !okKind(kb) || rough(a) || rough(b)) {
-      toast('Motorways start and end on land, not on houses or buildings.');
+      toast('Express tunnels start and end on land, not on houses or buildings.');
       return false;
     }
     if (Math.max(Math.abs(tx(a) - tx(b)), Math.abs(ty(a) - ty(b))) < 2) { toast('Pick an end point further away.'); return false; }
@@ -1336,7 +1336,7 @@
   const UPGRADES = {
     bridges: { label: 'Bridge', note: 'Cross water', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M4 34h40" stroke="#94c6d6" stroke-width="8"/><path d="M6 24c6-8 30-8 36 0" stroke="#9b7b57" stroke-width="4"/><path d="M6 24h36" stroke="#5a5b63" stroke-width="6"/></svg>' },
     rounds: { label: '2 roundabouts', note: 'Busy junctions flow better', n: 2, icon: '<svg viewBox="0 0 48 48" fill="none" stroke="#5a5b63" stroke-width="6" stroke-linecap="round"><path d="M24 4v12M24 32v12M4 24h12M32 24h12"/><circle cx="24" cy="24" r="9"/></svg>' },
-    motors: { label: 'Motorway', note: 'Fast straight link', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M8 40 40 8" stroke="#34353b" stroke-width="9"/><path d="M8 40 40 8" stroke="#f2d27a" stroke-width="1.6" stroke-dasharray="3 4"/></svg>' },
+    motors: { label: 'Express tunnel', note: 'Fast underground link', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round"><path d="M6 34h36" stroke="#3a332b" stroke-width="3" stroke-dasharray="4 4" opacity=".55"/><path d="M4 26a8 8 0 0 1 16 0z" fill="#c3b49a"/><path d="M7 26a5 5 0 0 1 10 0z" fill="#3a332b"/><path d="M28 26a8 8 0 0 1 16 0z" fill="#c3b49a"/><path d="M31 26a5 5 0 0 1 10 0z" fill="#3a332b"/><path d="M2 26h44" stroke="#5a5b63" stroke-width="3"/></svg>' },
     roads: { label: '20 road tiles', note: 'More road to lay', n: 20, icon: '<svg viewBox="0 0 48 48" fill="none" stroke="#5a5b63" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 40V24h16V8h16"/></svg>' },
     tunnels: { label: 'Tunnel', note: 'Go through a hill', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 40 18 12l7 10 5-6 15 24z" fill="#c3b49a"/><path d="M15 40v-6a9 9 0 0 1 18 0v6z" fill="#3a332b"/><path d="M3 41h42" stroke="#5a5b63" stroke-width="4"/></svg>' },
     entrances: { label: 'Extra car park', note: 'A second way in for a busy building', n: 1, icon: '<svg viewBox="0 0 48 48" fill="none" stroke-linejoin="round"><rect x="14" y="10" width="20" height="20" rx="4" fill="#e4572e"/><rect x="6" y="32" width="10" height="10" rx="2" fill="#9e3518"/><rect x="32" y="32" width="10" height="10" rx="2" fill="#9e3518"/></svg>' },
@@ -1589,6 +1589,9 @@
 
   function onDown(e) {
     if (!G || modal) return;
+    if (inspect) { closeInspect(); return; }
+    const arrow = e.isPrimary && edgeArrows.find((a) => Math.hypot(a.x - e.clientX, a.y - e.clientY) < 26);
+    if (arrow) { lookAt(arrow.d); return; }
     // A primary pointer means no other finger is down, so anything still
     // tracked is stale (iOS can swallow a finger lift near the Home bar).
     if (e.isPrimary) resetTouches();
@@ -1661,15 +1664,16 @@
     if (a.moved || e.type === 'pointercancel') return;
     const c = tileAtWorld(wxOf(e.clientX), wyOf(e.clientY));
     if (c < 0) return;
+    if (a.tool === 'road' && destAt(c) && !G.over) { openInspect(destAt(c)); return; }
     tapTool(a.tool, c);
     if (a.tool === 'round') {
       if (placeRoundabout(c) && G.res.rounds <= 0) setTool('road');
     } else if (a.tool === 'motor') {
-      if (G.res.motors <= 0) { toast('No motorways left. You can win more at the end of a week.'); return; }
+      if (G.res.motors <= 0) { toast('No express tunnels left. You can win more at the end of a week.'); return; }
       if (motorStart < 0) {
         const k = kind(c);
-        if ((k === 'road' || k === 'land') && !rough(c) && inB(tx(c), ty(c))) { motorStart = c; toast('Now tap where the motorway should end.'); }
-        else toast('Tap an empty tile or a road to start the motorway.');
+        if ((k === 'road' || k === 'land') && !rough(c) && inB(tx(c), ty(c))) { motorStart = c; toast('Now tap where the tunnel should come out.'); }
+        else toast('Tap an empty tile or a road for the tunnel entrance.');
       } else if (c === motorStart) {
         motorStart = -1;
       } else if (inB(tx(c), ty(c))) {
@@ -1821,6 +1825,26 @@
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const line = (e) => { ctx.moveTo(sx(tx(e.a) + 0.5), sy(ty(e.a) + 0.5)); ctx.lineTo(sx(tx(e.b) + 0.5), sy(ty(e.b) + 0.5)); };
+
+    // express tunnels run underground: a faint dashed line under everything,
+    // with their cars as faint shapes, so nothing on the surface is hidden
+    for (const e of motorEdges) {
+      ctx.strokeStyle = 'rgba(58,51,43,0.16)';
+      ctx.lineWidth = s * 0.5;
+      ctx.beginPath(); line(e); ctx.stroke();
+      if (e.jam > 0.06) {
+        ctx.strokeStyle = `rgba(226,74,40,${Math.min(0.5, e.jam * 0.6).toFixed(3)})`;
+        ctx.beginPath(); line(e); ctx.stroke();
+      }
+      ctx.strokeStyle = 'rgba(58,51,43,0.45)';
+      ctx.lineWidth = Math.max(1.5, s * 0.08);
+      ctx.setLineDash([s * 0.22, s * 0.2]);
+      ctx.beginPath(); line(e); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 0.5;
+    drawCars(true);
+    ctx.globalAlpha = 1;
     // bridge decks
     ctx.strokeStyle = PAL.bridge;
     ctx.lineWidth = s * 0.74;
@@ -1930,32 +1954,20 @@
     // houses
     for (const h of G.houses) drawHouse(h);
 
-    // motorways (elevated)
+    // express tunnel entrances: a tunnel mouth at each end, facing the other end
     for (const e of motorEdges) {
-      ctx.strokeStyle = 'rgba(0,0,0,0.18)';
-      ctx.lineWidth = s * 0.78;
-      ctx.beginPath();
-      ctx.moveTo(sx(tx(e.a) + 0.5) + s * 0.08, sy(ty(e.a) + 0.5) + s * 0.12);
-      ctx.lineTo(sx(tx(e.b) + 0.5) + s * 0.08, sy(ty(e.b) + 0.5) + s * 0.12);
-      ctx.stroke();
-      ctx.strokeStyle = PAL.motor;
-      ctx.lineWidth = s * 0.66;
-      ctx.beginPath(); line(e); ctx.stroke();
-      if (e.jam > 0.06) {
-        ctx.strokeStyle = `rgba(226,74,40,${Math.min(0.8, e.jam * 0.9).toFixed(3)})`;
-        ctx.beginPath(); line(e); ctx.stroke();
-      }
-      ctx.strokeStyle = PAL.motorLine;
-      ctx.lineWidth = Math.max(1, s * 0.05);
-      ctx.setLineDash([s * 0.2, s * 0.25]);
-      ctx.beginPath(); line(e); ctx.stroke();
-      ctx.setLineDash([]);
-      for (const n of [e.a, e.b]) {
-        ctx.fillStyle = PAL.motor;
-        ctx.beginPath(); ctx.arc(sx(tx(n) + 0.5), sy(ty(n) + 0.5), s * 0.36, 0, Math.PI * 2); ctx.fill();
+      for (const [n, o] of [[e.a, e.b], [e.b, e.a]]) {
+        const ang = Math.atan2(ty(o) - ty(n), tx(o) - tx(n));
+        ctx.save();
+        ctx.translate(sx(tx(n) + 0.5), sy(ty(n) + 0.5));
+        ctx.rotate(ang);
+        ctx.fillStyle = PAL.mountLight;
+        ctx.beginPath(); ctx.arc(0, 0, s * 0.42, -Math.PI / 2, Math.PI / 2); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#3a332b';
+        ctx.beginPath(); ctx.arc(0, 0, s * 0.3, -Math.PI / 2, Math.PI / 2); ctx.closePath(); ctx.fill();
+        ctx.restore();
       }
     }
-    drawCars(true);
 
     // effects
     for (const f of G.fx) {
@@ -2005,6 +2017,9 @@
       ctx.beginPath(); ctx.arc(sx(d.x + 1), sy(d.y + 1), s * (1.8 + pulse * 0.3), 0, Math.PI * 2); ctx.stroke();
       ctx.globalAlpha = 1;
     }
+    drawTipHighlights();
+    drawInspect();
+    drawEdgeArrows();
   }
 
   function drawCars(motor) {
@@ -2303,7 +2318,7 @@
     const k = b.dataset.res;
     if (k && G.res[k] <= 0) {
       const names = {
-        rounds: 'roundabouts', motors: 'motorways', entrances: 'extra car parks',
+        rounds: 'roundabouts', motors: 'express tunnels', entrances: 'extra car parks',
         dozers: 'bulldozer uses', moves: 'house moves',
       };
       toast(`No ${names[k]} left. You can pick more at the end of a week.`);
@@ -2312,7 +2327,7 @@
     setTool(t);
     const hints = {
       round: 'Tap a junction to add a roundabout.',
-      motor: 'Tap where the motorway should start.',
+      motor: 'Tap where the express tunnel should go in.',
       erase: 'Drag over roads to remove them. You get the tiles back.',
       entrance: 'Tap a building to add another car park.',
       dozer: 'Tap a hill or water tile to turn it into land.',
@@ -2349,7 +2364,7 @@
     if (helpReturn) openScreen(helpReturn); else closeScreen();
   });
   $('#btnNew').addEventListener('click', () => showMaps('sTitle'));
-  $('#btnContinue').addEventListener('click', () => { if (load()) { closeScreen(); showHud(true); } else showMaps('sTitle'); });
+  $('#btnContinue').addEventListener('click', () => { if (load()) { tut = null; inspect = null; coach(null); closeScreen(); showHud(true); } else showMaps('sTitle'); });
   $('#btnAgain').addEventListener('click', () => { closeScreen(); startNew(G.map); });
 
   let mapsReturn = null;
@@ -2400,6 +2415,9 @@
     showHud(true);
     newGame(map || MAPS[0]);
     save();
+    inspect = null;
+    coach(null);
+    if (startTutorial()) return;
     let seen = false;
     try { seen = !!localStorage.getItem(SEEN_HELP_KEY); } catch (e) { /* storage unavailable */ }
     if (!seen) openScreen('sHelp');
@@ -2454,6 +2472,253 @@
     });
   }
 
+  // ---------------------------------------------------------------- coach card
+  // One small card under the top bar, used by the first-game tips and by the
+  // "what's feeding this building" view.
+  let coachCb = null;
+  function coach(text, btnLabel, onBtn, showSkip) {
+    $('#coachText').textContent = text || '';
+    const b = $('#coachBtn');
+    b.hidden = !btnLabel;
+    b.textContent = btnLabel || '';
+    $('#coachSkip').hidden = !showSkip;
+    coachCb = onBtn || null;
+    $('#coach').hidden = !text;
+    document.body.classList.toggle('coaching', !!text);
+    measure();
+  }
+  $('#coachBtn').addEventListener('click', () => { const cb = coachCb; coachCb = null; if (cb) cb(); });
+  $('#coachSkip').addEventListener('click', () => endTutorial());
+
+  // ---------------------------------------------------------------- trouble off screen
+  // When you're zoomed in, a building filling up out of view gets an arrow at
+  // the edge of the screen, pulsing in time with the warning sound. Tap it to look.
+  let edgeArrows = [];
+  function drawEdgeArrows() {
+    edgeArrows = [];
+    if (!G || G.over || inspect) return;
+    const pad = 28;
+    const L = pad, R = view.w - view.right - pad, T = view.top + pad, Bt = view.h - view.bottom - pad;
+    const cx0 = (L + R) / 2, cy0 = (T + Bt) / 2;
+    for (const d of G.dests) {
+      const u = urgencyOf(d);
+      if (u <= 0) continue;
+      const px = sx(d.x + 1), py = sy(d.y + 1);
+      if (px > L - pad && px < R + pad && py > T - pad && py < Bt + pad) continue;
+      const dx = px - cx0, dy = py - cy0;
+      const kx = dx > 0 ? (R - cx0) / dx : dx < 0 ? (L - cx0) / dx : Infinity;
+      const ky = dy > 0 ? (Bt - cy0) / dy : dy < 0 ? (T - cy0) / dy : Infinity;
+      const k = Math.min(kx, ky);
+      const ax = cx0 + dx * k, ay = cy0 + dy * k;
+      const phase = (G.time % pulsePeriod(u)) / pulsePeriod(u);
+      const col = COLORS[d.color];
+      ctx.save();
+      ctx.translate(ax, ay);
+      ctx.globalAlpha = (1 - phase) * (0.4 + 0.5 * u);
+      ctx.strokeStyle = col.fill;
+      ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0, 0, 16 + phase * 14, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = col.fill;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.rotate(Math.atan2(dy, dx));
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(7, 0); ctx.moveTo(1, -6); ctx.lineTo(7, 0); ctx.lineTo(1, 6); ctx.stroke();
+      ctx.restore();
+      edgeArrows.push({ x: ax, y: ay, d });
+    }
+  }
+  function lookAt(d) {
+    const b = baseCam();
+    user.px = d.x + 1 - b.x;
+    user.py = d.y + 1 - b.y;
+    hudCache = '';
+  }
+
+  // ---------------------------------------------------------------- what's feeding a building
+  // Tap a building: the game pauses, everything else fades, and the houses and
+  // roads that can reach it light up.
+  let inspect = null;
+  function openInspect(d) {
+    const { dist, prev } = dijkstra(d.ports);
+    const edges = new Set();
+    const served = [], stranded = [];
+    for (const h of G.houses) {
+      if (h.color !== d.color) continue;
+      if (!isFinite(dist[h.i])) { stranded.push(h); continue; }
+      served.push(h);
+      let n = h.i;
+      for (let guard = 0; guard < 400 && prev[n] !== -1 && !d.ports.includes(n); guard++) {
+        const m = prev[n];
+        const e = G.adj[n].get(m);
+        if (e) edges.add(e);
+        n = m;
+      }
+    }
+    inspect = { d, edges, served, stranded, wasPaused: G.paused };
+    G.paused = true;
+    hudCache = '';
+    const name = COLORS[d.color].name;
+    const onWay = G.cars.filter((c) => c.dest === d && c.leg === 'out' && c.state !== 'home').length;
+    const waiting = Math.round(waitingAt(d));
+    const stuck = d.late || 0;
+    const total = served.length + stranded.length;
+    let text = `${served.length} of ${total} ${name} ${total === 1 ? 'house' : 'houses'} can reach this building. ` +
+      `${onWay} ${onWay === 1 ? 'car is' : 'cars are'} on the way and ${waiting} ${waiting === 1 ? 'visitor is' : 'visitors are'} waiting` +
+      (stuck ? `, ${stuck} of them stuck in traffic. ` : '. ');
+    if (!served.length) text += `Connect a ${name} house to it.`;
+    else if (stuck) text += 'Traffic is holding cars up. A roundabout or another route would help.';
+    else if (waiting > 2) text += `It needs more ${name} houses connected to it.`;
+    else text += "It's coping fine.";
+    if (stranded.length && served.length) text += ` ${stranded.length} ${name} ${stranded.length === 1 ? 'house has' : 'houses have'} no road to it yet.`;
+    coach(text, 'Carry on', closeInspect);
+    if (tut && tut.cur && tut.cur.id === 'busy') tut.inspected = true;
+  }
+  function closeInspect() {
+    if (!inspect) return;
+    G.paused = inspect.wasPaused;
+    inspect = null;
+    hudCache = '';
+    if (tut && tut.cur) showTipCard(tut.cur); else coach(null);
+  }
+  function drawInspect() {
+    if (!inspect) return;
+    const s = cam.s;
+    const { d, edges, served, stranded } = inspect;
+    const col = COLORS[d.color];
+    ctx.fillStyle = 'rgba(24,25,30,0.55)';
+    ctx.fillRect(0, 0, view.w, view.h);
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = s * 0.62;
+    ctx.beginPath();
+    for (const e of edges) { ctx.moveTo(sx(tx(e.a) + 0.5), sy(ty(e.a) + 0.5)); ctx.lineTo(sx(tx(e.b) + 0.5), sy(ty(e.b) + 0.5)); }
+    ctx.stroke();
+    ctx.strokeStyle = col.fill;
+    ctx.lineWidth = s * 0.46;
+    ctx.stroke();
+    for (const e of edges) {
+      if (!(e.jam > 0.06)) continue;
+      ctx.strokeStyle = `rgba(226,74,40,${Math.min(0.9, e.jam).toFixed(3)})`;
+      ctx.beginPath(); ctx.moveTo(sx(tx(e.a) + 0.5), sy(ty(e.a) + 0.5)); ctx.lineTo(sx(tx(e.b) + 0.5), sy(ty(e.b) + 0.5)); ctx.stroke();
+    }
+    drawDest(d);
+    for (const h of served) drawHouse(h);
+    ctx.setLineDash([s * 0.18, s * 0.14]);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = Math.max(1.5, s * 0.07);
+    for (const h of stranded) {
+      drawHouse(h);
+      ctx.beginPath(); ctx.arc(sx(tx(h.i) + 0.5), sy(ty(h.i) + 0.5), s * 0.62, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  // ---------------------------------------------------------------- first game tips
+  // The first time you play Millbrook, tips appear one at a time as each idea
+  // comes up, instead of everything at once before you've played.
+  const TUT_KEY = 'byways-tutorial-done';
+  let tut = null;
+  const busiest = () => G.dests.reduce((a, d) => (!a || urgencyOf(d) > urgencyOf(a) ? d : a), null);
+  const TIPS = [
+    {
+      id: 'road', pause: true,
+      text: 'Drag a road from a house to the car park marked P. Visitors need a way to get to the building. The game waits until you do.',
+      ready: () => G.time > 0.8,
+      until: () => G.houses.some((h) => !h.cut),
+      hl: () => {
+        const d = G.dests[0];
+        const h = G.houses.find((x) => x.cut);
+        const out = [];
+        if (h) out.push({ x: tx(h.i) + 0.5, y: ty(h.i) + 0.5, r: 0.7 });
+        if (d) out.push({ x: tx(d.ports[0]) + 0.5, y: ty(d.ports[0]) + 0.5, r: 0.7 });
+        return out;
+      },
+    },
+    {
+      id: 'more', btn: 'Got it',
+      text: 'Now cars carry visitors to the building. Connect the other houses too. New houses keep appearing, and pulse until they have a road.',
+      ready: (done) => done.has('road'),
+      until: () => G.cutOff === 0 && G.houses.length > 3,
+    },
+    {
+      id: 'bridge', btn: 'Got it',
+      text: 'A house still has no road. If water is in the way, draw straight across it and a bridge is built for you. The toolbar shows how many bridges you have.',
+      ready: (done) => done.has('more') && G.bridgesUsed === 0 && G.houses.some((h) => h.cut && G.time - h.born > 10),
+      until: () => G.bridgesUsed > 0,
+    },
+    {
+      id: 'busy', pause: true,
+      text: 'This building is getting busy: the ripples mean visitors are waiting. Tap the building to see which houses and roads feed it.',
+      ready: (done) => done.has('more') && G.dests.some((d) => urgencyOf(d) > 0),
+      until: () => tut.inspected && !inspect,
+      hl: () => { const d = busiest(); return d ? [{ x: d.x + 1, y: d.y + 1, r: 1.7 }] : []; },
+    },
+    {
+      id: 'jam', pause: true, btn: 'Got it',
+      text: 'Red roads mean cars are stuck. Stuck cars count as waiting, so jams fill a building’s timer. Roundabouts and extra routes help, and you can pick upgrades at the end of each week.',
+      ready: (done) => done.has('more') && [...G.edges.values()].some((e) => e.jam > 0.5),
+    },
+    {
+      id: 'end', btn: 'Play on',
+      text: 'That’s the basics. Reach 500 trips to unlock the next map. You can read all the tips again under How to play in the menu.',
+      ready: (done) => done.has('more') && ((done.has('busy') && done.has('jam')) || G.week >= 5),
+    },
+  ];
+  function startTutorial() {
+    let finished = false;
+    try { finished = !!localStorage.getItem(TUT_KEY); } catch (e) { /* storage unavailable */ }
+    tut = finished || G.map.id !== MAPS[0].id ? null : { done: new Set(), cur: null, inspected: false };
+    return !!tut;
+  }
+  function showTipCard(t) { coach(t.text, t.btn, finishTip, true); }
+  function showTip(t) {
+    tut.cur = t;
+    if (t.pause) { G.paused = true; hudCache = ''; }
+    showTipCard(t);
+  }
+  function finishTip() {
+    if (!tut || !tut.cur) return;
+    const t = tut.cur;
+    tut.done.add(t.id);
+    tut.cur = null;
+    if (t.pause) { G.paused = false; hudCache = ''; }
+    coach(null);
+    if (t.id === 'end') endTutorial();
+  }
+  function endTutorial() {
+    if (tut && tut.cur && tut.cur.pause) { G.paused = false; hudCache = ''; }
+    tut = null;
+    try { localStorage.setItem(TUT_KEY, '1'); localStorage.setItem(SEEN_HELP_KEY, '1'); } catch (e) { /* storage unavailable */ }
+    if (!inspect) coach(null);
+  }
+  function tutTick() {
+    if (!tut || !G || G.demo || G.over || modal || inspect) return;
+    if (tut.cur) {
+      if (tut.cur.until && tut.cur.until()) finishTip();
+      return;
+    }
+    const next = TIPS.find((t) => !tut.done.has(t.id) && t.ready(tut.done));
+    if (next) showTip(next);
+  }
+  function drawTipHighlights() {
+    if (!tut || !tut.cur || !tut.cur.hl || inspect || modal) return;
+    const s = cam.s;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 220);
+    ctx.strokeStyle = '#24262c';
+    ctx.lineWidth = Math.max(2, s * 0.09);
+    for (const p of tut.cur.hl()) {
+      ctx.globalAlpha = 0.45 + 0.45 * pulse;
+      ctx.beginPath(); ctx.arc(sx(p.x), sy(p.y), s * (p.r + 0.12 * pulse), 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
   // ---------------------------------------------------------------- lifecycle
   function measure() {
     view.dpr = Math.min(3, window.devicePixelRatio || 1);
@@ -2462,6 +2727,9 @@
     canvas.width = Math.round(view.w * view.dpr);
     canvas.height = Math.round(view.h * view.dpr);
     view.top = el.top.hidden ? 0 : el.top.getBoundingClientRect().bottom;
+    // keep the map clear of the tip card while it's showing
+    const card = $('#coach');
+    if (!card.hidden) view.top = Math.max(view.top, card.getBoundingClientRect().bottom + 6);
     view.bottom = 0;
     view.right = 0;
     if (!el.bottom.hidden) {
@@ -2719,6 +2987,7 @@
     updateCamera(dt);
     render();
     updateHud();
+    tutTick();
     audioTick();
     requestAnimationFrame(frame);
   }
@@ -2731,5 +3000,5 @@
   requestAnimationFrame(frame);
 
   // exposed for testing in the browser console
-  window.__byways = { get G() { return G; }, snd, audioStart, audioTick, landAreas, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress, addEntrance, bulldoze, moveHouse, canGo, nodeFor, deck, showUpgrade, dispatch };
+  window.__byways = { get G() { return G; }, get tut() { return tut; }, get inspect() { return inspect; }, tutTick, openInspect, closeInspect, render, snd, audioStart, audioTick, landAreas, cam, step, tryConnect, idx, findPath, save, load, sx, sy, MAPS, user, startNew, getProgress, addEntrance, bulldoze, moveHouse, canGo, nodeFor, deck, showUpgrade, dispatch };
 })();

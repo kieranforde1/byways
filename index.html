@@ -121,6 +121,15 @@
     background: var(--paper); color: var(--ink); padding: 8px 14px; border-radius: 12px; font-size: 14px; font-weight: 600;
     opacity: 0; transition: opacity .2s, transform .2s; pointer-events: none; max-width: 86vw; text-align: center; }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  body.coaching #toast { top: calc(env(safe-area-inset-top) + 190px); }
+  #coach { position: absolute; left: 50%; top: calc(env(safe-area-inset-top) + 62px); transform: translateX(-50%);
+    width: min(360px, calc(100vw - 24px)); background: var(--paper); color: var(--ink); border-radius: 16px;
+    padding: 12px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.28); font-size: 15px; line-height: 1.4; }
+  #coach p { margin: 0; }
+  .coach-row { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 10px; }
+  .coach-row:not(:has(button:not([hidden]))) { display: none; }
+  #coach .btn { width: auto; margin: 0; padding: 9px 16px; font-size: 15px; }
+  .coach-skip { background: none; border: 0; color: var(--muted); font: inherit; font-size: 14px; font-weight: 600; padding: 6px; margin-right: auto; }
 
   .screen { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px;
     padding-top: calc(env(safe-area-inset-top) + 24px); padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
@@ -210,10 +219,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><path d="M12 2v5M12 17v5M2 12h5M17 12h5"/></svg>
       Roundabout
     </button>
-    <button class="tool" data-tool="motor" data-res="motors" aria-label="Motorway" hidden>
+    <button class="tool" data-tool="motor" data-res="motors" aria-label="Express tunnel" hidden>
       <span class="count" id="cMotors">0</span>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 19 20 5"/><path d="M8 19 20 8.5" stroke-dasharray="2 3"/><circle cx="4" cy="19" r="2" fill="currentColor"/><circle cx="20" cy="5" r="2" fill="currentColor"/></svg>
-      Motorway
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12a4 4 0 0 1 8 0"/><path d="M14 12a4 4 0 0 1 8 0"/><path d="M6 16h12" stroke-dasharray="2 2.6"/></svg>
+      Express
     </button>
     <button class="tool" data-tool="entrance" data-res="entrances" aria-label="Extra car park" hidden>
       <span class="count">0</span>
@@ -234,6 +243,13 @@
 </div>
 
 <div id="toast"></div>
+<div id="coach" hidden>
+  <p id="coachText"></p>
+  <div class="coach-row">
+    <button class="coach-skip" id="coachSkip" hidden>Skip tips</button>
+    <button class="btn" id="coachBtn" hidden></button>
+  </div>
+</div>
 
 <!-- Title -->
 <div class="screen" id="sTitle">
@@ -256,12 +272,13 @@
       <li><span class="n">1</span><span>Drag your finger from a house to a building of the same colour to lay a road.</span></li>
       <li><span class="n">2</span><span>Buildings show white dots when they need visitors. A ring means a car is on its way.</span></li>
       <li><span class="n">3</span><span>If too many dots wait with no car coming, or with their car stuck in traffic, the building starts to pulse and a timer fills. You have about a minute to fix it. When it's full, the game ends.</span></li>
-      <li><span class="n">4</span><span>Road tiles run out. Each week you get more, and you pick one of three upgrades, like roundabouts, motorways or a bulldozer. New tools appear in your toolbar, and tapping one tells you how to use it.</span></li>
+      <li><span class="n">4</span><span>Road tiles run out. Each week you get more, and you pick one of three upgrades, like roundabouts, express tunnels or a bulldozer. New tools appear in your toolbar, and tapping one tells you how to use it.</span></li>
       <li><span class="n">5</span><span>The crossed-out house at the top counts houses with no road to their building. They pulse on the map, and so does any building that no matching house can reach yet.</span></li>
       <li><span class="n">6</span><span>Reach a map's trip target to unlock the next, harder map.</span></li>
       <li><span class="n">7</span><span>Roads turn red where cars are stuck in traffic. That's where a roundabout or a new route will help most.</span></li>
       <li><span class="n">8</span><span>Made a mistake? The undo button, bottom left, takes back your last road change.</span></li>
-      <li><span class="n">9</span><span>Pause any time. You can still draw while paused. Pinch to zoom. If colours are hard to tell apart, turn on colour shapes in the menu.</span></li>
+      <li><span class="n">9</span><span>Tap a building to pause and see which houses and roads can reach it. When you&rsquo;re zoomed in, arrows at the edge of the screen point to buildings that are filling up.</span></li>
+      <li><span class="n">10</span><span>Pause any time. You can still draw while paused. Pinch to zoom. If colours are hard to tell apart, turn on colour shapes in the menu.</span></li>
     </ul>
     <button class="btn" id="btnHelpDone">Got it</button>
   </div>
